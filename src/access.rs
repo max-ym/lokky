@@ -2,9 +2,9 @@ use crate::marker::Scoped;
 use crate::scope::{AllocMarker, AllocSelector};
 use core::alloc::{GlobalAlloc, Layout};
 use core::marker::PhantomData;
-use core::mem::transmute;
+use core::mem::{transmute};
 use core::ptr::NonNull;
-use core::{mem, ptr, slice};
+use core::{ptr, slice};
 
 /// The access to the memory location that stores some type `T`.
 pub trait Access<T: ?Sized> {
@@ -19,6 +19,9 @@ pub trait AccessMut<T: ?Sized>: Access<T> {
 /// A wrapper type for a reference to type `T`.
 pub struct RefAccess<'a, T: ?Sized>(&'a T);
 
+/// A wrapper type for a mutable reference to type `T`.
+pub struct MutAccess<'a, T: ?Sized>(&'a mut T);
+
 /// The access that is guaranteed to be valid in some scope.
 pub struct ScopeAccess<T: ?Sized> {
     ptr: NonNull<T>,
@@ -29,6 +32,18 @@ pub struct ScopeAccess<T: ?Sized> {
 
 impl<'a, T: ?Sized> Access<T> for RefAccess<'a, T> {
     fn access(&self) -> &T {
+        self.0
+    }
+}
+
+impl<'a, T: ?Sized> Access<T> for MutAccess<'a, T> {
+    fn access(&self) -> &T {
+        self.0
+    }
+}
+
+impl<'a, T: ?Sized> AccessMut<T> for MutAccess<'a, T> {
+    fn access_mut(&mut self) -> &mut T {
         self.0
     }
 }
@@ -49,8 +64,7 @@ impl<T: ?Sized> Drop for ScopeAccess<T> {
     fn drop(&mut self) {
         unsafe {
             self.ptr.as_ptr().drop_in_place();
-            self.alloc
-                .dealloc(self.ptr.as_ptr() as _, Layout::for_value(self.ptr.as_ref()));
+            self.dealloc();
         }
     }
 }
@@ -104,6 +118,30 @@ impl<T: ?Sized> ScopeAccess<T> {
         }
     }
 
+    /// Change the access to the value to access to the array of values. 
+    ///
+    /// # Safety
+    /// The length of the slice should not be larger than the actual slice length so that
+    /// memory accesses will be valid.
+    pub unsafe fn slice_ref(&self, len: usize) -> RefAccess<[T]>
+    where
+        T: Sized,
+    {
+        RefAccess(slice::from_raw_parts(self.ptr.as_ptr(), len))
+    }
+
+    /// Change the access to the value to access to the array of values. 
+    ///
+    /// # Safety
+    /// The length of the slice should not be larger than the actual slice length so that
+    /// memory accesses will be valid.
+    pub unsafe fn slice_mut(&mut self, len: usize) -> MutAccess<[T]>
+    where
+        T: Sized,
+    {
+        MutAccess(slice::from_raw_parts_mut(self.ptr.as_ptr(), len))
+    }
+
     /// Create the clone of the access.
     ///
     /// # Safety
@@ -126,15 +164,49 @@ impl<T: ?Sized> ScopeAccess<T> {
     pub fn forget(self) {}
 }
 
+impl<T: 'static + ?Sized> ScopeAccess<T> {
+    /// Get allocation query for given access that was used to select the allocator.
+    pub fn alloc_selector(&self) -> AllocSelector {
+        AllocSelector::with_marker::<T>(self.marker())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllocError;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArrayAllocError {
+    CapacityOverflow,
+    AllocError(AllocError)
+}
+
 impl<T> ScopeAccess<T> {
+    /// Allocate the given value on the heap of the current scope. Given query will be used
+    /// to select appropriate allocator.
+    pub fn alloc(value: T, selector: AllocSelector) -> Result<Self, AllocError> {
+        let mut access = Self::alloc_layout(Layout::for_value(&value), selector)?;
+        *access.access_mut() = value;
+        Ok(access)
+    }
+
+    /// Allocate memory using given `Layout` and `AllocQuery`.
+    fn alloc_layout(layout: Layout, selector: AllocSelector) -> Result<Self, AllocError> {
+        let alloc = crate::scope::current().alloc_for(selector);
+        let mem = unsafe { alloc.alloc(layout) as *mut T };
+        if let Some(ptr) = NonNull::new(mem) {
+            // SAFETY: all parameters are guaranteed to be correct in the code above.
+            let alloc = unsafe { ScopeAccess::new(ptr, alloc, selector.marker()) };
+            Ok(alloc)
+        } else {
+            Err(AllocError)
+        }
+    }    
+    
     /// Read out the accessed value and deallocate the memory.
-    pub fn into_inner(self) -> T {
+    pub fn into_inner(mut self) -> T {
         unsafe {
             let v = ptr::read(self.ptr.as_ptr());
-            self.alloc
-                .dealloc(self.ptr.as_ptr() as _, Layout::for_value(self.ptr.as_ref()));
-            // Forget access to avoid destructor run.
-            mem::forget(self);
+            self.dealloc();
             v
         }
     }
@@ -155,50 +227,48 @@ impl<T> ScopeAccess<T> {
     }
 }
 
-impl<T: 'static + ?Sized> ScopeAccess<T> {
-    /// Get allocation query for given access that was used to select the allocator.
-    pub fn alloc_query(&self) -> AllocSelector {
-        AllocSelector::with_marker::<T>(self.marker())
+impl<T: ?Sized> ScopeAccess<T> {
+    /// Deallocate memory.
+    /// 
+    /// # Safety
+    /// Memory should not be accessed and Drop execution should be prevented.
+    pub unsafe fn dealloc(&mut self) {
+        self.alloc.dealloc(self.ptr.as_ptr() as _, Layout::for_value(self.ptr.as_ref()));
     }
 }
 
-impl<T> ScopeAccess<T> {
-    /// Allocate the given value on the heap of the current scope. Given query will be used
-    /// to select appropriate allocator.
-    pub fn alloc(value: T, query: AllocSelector) -> Self {
-        let mut access = Self::alloc_layout(Layout::for_value(&value), query);
-        *access.access_mut() = value;
-        access
-    }
-
+impl<T> ScopeAccess<[T]> {
     /// Allocate uninitialized array. Given query will be used
     /// to select appropriate allocator.
-    pub fn alloc_array_uninit(capacity: usize, query: AllocSelector) -> Self {
-        Self::alloc_layout(Layout::array::<T>(capacity).unwrap(), query)
+    pub fn alloc_array_uninit(capacity: usize, selector: AllocSelector) -> Result<Self, ArrayAllocError> {
+        use ArrayAllocError::*;
+        ScopeAccess::<T>::alloc_layout(
+            Layout::array::<T>(capacity)
+            .map_err(|_| CapacityOverflow)?, 
+            selector)
+        .map_err(AllocError)
+        .map(|v| unsafe { v.cast_to_slice(capacity) })
     }
 
     /// Reallocate array.
     ///
     /// # Safety
-    /// Old capacity should be the same as the one used to allocate the array.
-    pub unsafe fn realloc_array(&mut self, old_capacity: usize, new_capacity: usize) {
+    /// If new capacity is greater than previous then array will be populated with uninitialized
+    /// values and caller must ensure those are not read from or else undefined behaviour.
+    pub unsafe fn realloc_array(&mut self, new_capacity: usize) -> Result<(), ArrayAllocError> {
+        use ArrayAllocError::*;
         let ptr = self.alloc.realloc(
             self.ptr.as_ptr() as _,
-            Layout::array::<T>(old_capacity).unwrap(),
+            Layout::array::<T>(self.access().len()).map_err(|_| CapacityOverflow)?,
             new_capacity,
         );
-        self.ptr = NonNull::new(ptr as _).expect("array reallocation failed");
-    }
-
-    /// Allocate memory using given `Layout` and `AllocQuery`.
-    fn alloc_layout(layout: Layout, query: AllocSelector) -> Self {
-        let alloc = crate::scope::current().alloc_for(query);
-        let mem = unsafe { alloc.alloc(layout) as *mut T };
-        if let Some(ptr) = NonNull::new(mem) {
-            // SAFETY: all parameters are guaranteed to be correct in the code above.
-            unsafe { ScopeAccess::new(ptr, alloc, query.marker()) }
+        if ptr.is_null() {
+            Err(AllocError(super::AllocError))
         } else {
-            panic!("Allocator returned null pointer");
+            self.ptr = NonNull::new_unchecked(
+                slice::from_raw_parts_mut(ptr as _, new_capacity)
+            );
+            Ok(())
         }
     }
 }

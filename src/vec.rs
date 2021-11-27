@@ -1,32 +1,20 @@
-use core::alloc::Layout;
-use super::*;
-use core::{cmp, mem, ptr, slice};
-use core::ptr::drop_in_place;
-use crate::scope::AllocSelector;
+use core::{
+    borrow::{Borrow, BorrowMut},
+    cmp,
+    hash::{Hash, Hasher},
+    mem::{size_of, MaybeUninit},
+    ops::{Deref, DerefMut, Index, IndexMut},
+    ptr::{self, copy_nonoverlapping, drop_in_place},
+    slice::{self, SliceIndex},
+};
 
-pub struct Vec<T> {
-    ptr: ScopeAccess<T>,
-    cap: usize,
+use super::*;
+use crate::{marker::impose_lifetime_mut, scope::AllocSelector};
+
+pub struct Vec<T: 'static> {
+    ptr: ScopeAccess<[T]>,
     len: usize,
 }
-
-impl<T: 'static> Default for Vec<T> {
-    fn default() -> Self {
-        Vec::new()
-    }
-}
-
-macro_rules! assert_index(
-    ($msg:expr, $index:expr, $len:expr) => {
-        if $index >= $len {
-            #[cold]
-            #[track_caller]
-            #[inline(never)]
-            fn cold(index: usize, len: usize) { panic!($msg, index, len) }
-            cold($index, $len);
-        }
-    };
-);
 
 impl<T: 'static> Vec<T> {
     // Tiny Vecs are dumb. Skip to:
@@ -34,9 +22,9 @@ impl<T: 'static> Vec<T> {
     //   to round up a request of less than 8 bytes to at least 8 bytes.
     // - 4 if elements are moderate-sized (<= 1 KiB).
     // - 1 otherwise, to avoid wasting too much space for very short Vecs.
-    const MIN_NON_ZERO_CAP: usize = if mem::size_of::<T>() == 1 {
+    const MIN_NON_ZERO_CAP: usize = if core::mem::size_of::<T>() == 1 {
         8
-    } else if mem::size_of::<T>() <= 1024 {
+    } else if core::mem::size_of::<T>() <= 1024 {
         4
     } else {
         1
@@ -44,276 +32,39 @@ impl<T: 'static> Vec<T> {
 
     #[inline]
     pub fn new() -> Self {
+        let alloc = scope::current().alloc_for(AllocSelector::new::<T>());
+        // SAFETY: when capacity is set to zero ptr will never be accessed and may safely
+        // remain dangling.
+        let ptr = unsafe { ScopeAccess::<T>::dangling(alloc, Default::default()) };
         Vec {
-            // This is safe as we do not access the memory when capacity is 0. 
-            ptr: unsafe { ScopeAccess::dangling(
-                crate::scope::current().alloc_for(AllocSelector::new::<T>()),
-                Default::default(),
-            )},
-            cap: 0,
+            ptr: unsafe { ptr.cast_to_slice(0) },
             len: 0,
         }
     }
 
+    #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
-        if capacity == 0 {
-            Vec::new()
-        } else if core::mem::size_of::<T>() != 0 {
-            Layout::array::<T>(capacity)
-                .unwrap_or_else(|_| capacity_overflow());
-            alloc_guard(capacity)
-                .unwrap_or_else(|_| capacity_overflow());
-            let ptr = ScopeAccess::alloc_array_uninit(
-                capacity, AllocSelector::new::<T>()
-            );
-            Vec {
-                ptr,
-                cap: capacity,
-                len: 0,
-            }
+        Self::try_with_capacity(capacity).unwrap()
+    }
+
+    #[inline]
+    pub fn try_with_capacity(capacity: usize) -> Result<Self, ArrayAllocError> {
+        if capacity == 0 || size_of::<T>() == 0 {
+            Ok(Vec::new())
         } else {
-            Vec {
-                ptr: unsafe { ScopeAccess::dangling(
-                    crate::scope::current().alloc_for(AllocSelector::new::<T>()),
-                    Default::default(),
-                )},
-                cap: capacity,
-                len: 0,
-            }
+            let selector = AllocSelector::new::<T>();
+            let ptr = ScopeAccess::alloc_array_uninit(capacity, selector)?;
+            Ok(Vec { ptr, len: 0 })
         }
     }
 
-    pub const fn capacity(&self) -> usize {
-        if mem::size_of::<T>() == 0 {
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        if size_of::<T>() == 0 {
             usize::MAX
         } else {
-            self.cap
+            self.ptr.access().len()
         }
-    }
-
-    #[inline]
-    pub fn reserve(&mut self, additional: usize) {
-        let required_cap = self.len.checked_add(additional)
-            .unwrap_or_else(|| capacity_overflow());
-
-        if self.cap < required_cap {
-            self.do_reserve(required_cap);
-        }
-    }
-
-    #[inline]
-    pub fn reserve_exact(&mut self, additional: usize) {
-        #[cold]
-        fn do_realloc<T: 'static>(slf: &mut Vec<T>, c: usize) {
-            slf.do_realloc(c)
-        }
-
-        let required_cap = self.len.checked_add(additional)
-            .unwrap_or_else(|| capacity_overflow());
-
-        if self.cap < required_cap {
-            do_realloc(self, required_cap);
-        }
-    }
-
-    #[cold]
-    fn do_reserve(&mut self, required_cap: usize) {
-        let cap = cmp::max(self.cap * 2, required_cap);
-        let cap = cmp::max(Vec::<T>::MIN_NON_ZERO_CAP, cap);
-        self.do_realloc(cap);
-    }
-
-    fn do_realloc(&mut self, required_cap: usize) {
-        if mem::size_of::<T>() == 0 {
-            capacity_overflow();
-        }
-
-        unsafe { self.ptr.realloc_array(self.cap, required_cap); }
-        self.cap = required_cap;
-    }
-
-    pub fn shrink_to_fit(&mut self) {
-        if self.len < self.cap {
-            self.do_realloc(self.len);
-        }
-    }
-
-    pub fn shrink_to(&mut self, min_capacity: usize) {
-        if self.cap > min_capacity {
-            if self.len < min_capacity {
-                self.do_realloc(min_capacity);
-            } else {
-                self.shrink_to_fit();
-            }
-        }
-    }
-
-    #[inline]
-    pub fn into_boxed_slice(mut self) -> crate::boxed::Box<[T]> {
-        self.shrink_to_fit();
-        unsafe { crate::boxed::Box(self.ptr.cast_to_slice(self.len)) }
-    }
-
-    pub fn truncate(&mut self, len: usize) {
-        if self.len > len {
-            let remainder_len = self.len - len;
-            let remainder = unsafe {
-                slice::from_raw_parts_mut(
-                    (self.ptr.access_mut() as *mut T).add(len),
-                    remainder_len,
-                )
-            };
-
-            for i in remainder {
-                unsafe { drop_in_place(i); }
-            }
-
-            self.len = len;
-        }
-    }
-
-    #[inline]
-    pub fn as_slice(&self) -> &[T] {
-        unsafe { slice::from_raw_parts(self.ptr.access(), self.len) }
-    }
-
-    #[inline]
-    pub fn as_slice_mut(&mut self) -> &mut [T] {
-        unsafe { slice::from_raw_parts_mut(self.ptr.access_mut(), self.len) }
-    }
-
-    #[inline]
-    pub fn as_ptr(&self) -> *const T {
-        self.ptr.access()
-    }
-
-    #[inline]
-    pub fn as_mut_ptr(&mut self) -> *mut T {
-        self.ptr.access_mut()
-    }
-
-    #[inline]
-    pub unsafe fn set_len(&mut self, len: usize) {
-        debug_assert!(self.cap >= len);
-        self.len = len;
-    }
-
-    #[inline]
-    pub fn swap_remove(&mut self, index: usize) -> T {
-        assert_index!("swap_remove index (is {}) should be < len (is {})", index, self.len);
-
-        unsafe {
-            let last = ptr::read(self.as_ptr().add(self.len - 1));
-            let hole = self.as_mut_ptr().add(index);
-            self.set_len(self.len - 1);
-            ptr::replace(hole, last)
-        }
-    }
-
-    #[inline]
-    pub fn insert(&mut self, index: usize, element: T) {
-        assert_index!("insertion index (is {}) should be <= len (is {})", index, self.len);
-
-        if self.len == self.capacity() {
-            self.reserve(1);
-        }
-
-        unsafe {
-            let p = self.as_mut_ptr().add(index);
-            ptr::copy(p, p.add(1), self.len - index);
-            ptr::write(p, element);
-            self.set_len(self.len + 1);
-        }
-    }
-
-    #[inline]
-    pub fn remove(&mut self, index: usize) -> T {
-        assert_index!("removal index (is {}) should be < len (is {})", index, self.len);
-
-        unsafe {
-            let ptr = self.as_mut_ptr().add(index);
-            let ret = ptr::read(ptr);
-            ptr::copy(ptr.add(1), ptr, self.len - index - 1);
-            ret
-        }
-    }
-
-    pub fn retain(&mut self, mut f: impl FnMut(&T) -> bool) {
-        // Vec: [Kept, Kept, Hole, Hole, Hole, Hole, Unchecked, Unchecked]
-        //      |<-              processed len   ->| ^- next to check
-        //                  |<-  deleted cnt     ->|
-        //      |<-              original_len                          ->|
-        // Kept: Elements which predicate returns true on.
-        // Hole: Moved or dropped element slot.
-        // Unchecked: Unchecked valid elements.
-        //
-        // This drop guard will be invoked when predicate or `drop` of element panicked.
-        // It shifts unchecked elements to cover holes and `set_len` to the correct length.
-        // In cases when predicate and `drop` never panick, it will be optimized out.
-        struct BackshiftOnDrop<'a, T: 'static> {
-            vec: &'a mut Vec<T>,
-            processed_count: usize,
-            original_len: usize,
-            deleted_count: usize,
-        }
-
-        impl<'a, T: 'static> Drop for BackshiftOnDrop<'a, T> {
-            fn drop(&mut self) {
-                if self.deleted_count > 0 {
-                    // SAFETY: Trailing unchecked items must be valid since we never touch them.
-                    unsafe {
-                        ptr::copy(
-                            self.vec.as_ptr().add(self.processed_count),
-                            self.vec.as_mut_ptr().add(self.processed_count - self.deleted_count),
-                            self.original_len - self.processed_count,
-                        )
-                    }
-                }
-                // SAFETY: After filling holes, all items are in contiguous memory.
-                unsafe {
-                    self.vec.set_len(self.original_len - self.deleted_count);
-                }
-            }
-        }
-
-        let original_len = self.len();
-        let mut g = BackshiftOnDrop {
-            vec: self,
-            processed_count: 0,
-            deleted_count: 0,
-            original_len,
-        };
-
-        // Avoid double drop if the drop guard is not executed,
-        // since we may make some holes during the process.
-        unsafe { g.vec.set_len(0) };
-
-        while g.processed_count < original_len {
-            unsafe {
-                // SAFETY: Unchecked element must be valid.
-                let cur = g.vec.as_mut_ptr().add(g.processed_count);
-
-                if !f(&*cur) {
-                    // Advance early to avoid double drop if `drop_in_place` panicked.
-                    g.processed_count += 1;
-                    g.deleted_count += 1;
-
-                    // SAFETY: We never touch this element again after dropped.
-                    ptr::drop_in_place(cur);
-                    continue;
-                }
-                if g.deleted_count > 0 {
-                    // SAFETY: `deleted_count` > 0, so the hole slot must not overlap with current
-                    // element. We use copy for move, and never touch this element again.
-                    let hole = g.vec.as_mut_ptr().add(g.processed_count - g.deleted_count);
-                    ptr::copy_nonoverlapping(cur, hole, 1);
-                }
-                g.processed_count += 1;
-            }
-        }
-
-        // All item are processed. This can be optimized to `set_len` by LLVM.
-        drop(g);
     }
 
     #[inline]
@@ -321,120 +72,48 @@ impl<T: 'static> Vec<T> {
         self.len
     }
 
+    /// Forces the length of the vector to `new_len`.
+    ///
+    /// This is a low-level operation that maintains none of the normal
+    /// invariants of the type. Normally changing the length of a vector
+    /// is done using one of the safe operations instead, such as
+    /// [`truncate`], [`resize`], [`extend`], or [`clear`].
+    ///
+    /// [`truncate`]: Vec::truncate
+    /// [`resize`]: Vec::resize
+    /// [`extend`]: Extend::extend
+    /// [`clear`]: Vec::clear
+    ///
+    /// # Safety
+    ///
+    /// - `new_len` must be less than or equal to [`capacity()`].
+    /// - The elements at `old_len..new_len` must be initialized.
+    ///
+    /// [`capacity()`]: Vec::capacity
     #[inline]
-    pub fn clear(&mut self) {
-        self.truncate(0);
-    }
-
-    pub fn dedup_by(&mut self, mut same_bucket: impl FnMut(&mut T, &mut T) -> bool) {
-        if self.len() <= 1 {
-            return;
-        }
-
-        // Drop guard that will remove holes in Vec in case same_bucket fn panics.
-        struct FillGapOnDrop<'a, T: 'static> {
-            vec: &'a mut Vec<T>,
-
-            // Element index to test and drop if duplicate.
-            test: usize,
-
-            // Element index to compare with and that will remain.
-            retain: usize,
-        }
-
-        impl<'a, T: 'static> Drop for FillGapOnDrop<'a, T> {
-            fn drop(&mut self) {
-                // The space between test and retain indices indicates the hole count.
-                let delete_count = self.test - self.retain - 1;
-                unsafe {
-                    let hole = self.vec.as_mut_ptr().add(self.retain + 1);
-                    let remainder = self.vec.as_ptr().add(self.test);
-                    ptr::copy(remainder, hole, self.vec.len() - self.test);
-                    self.vec.set_len(self.vec.len() - delete_count);
-                }
-            }
-        }
-
-        let mut g = FillGapOnDrop {
-            vec: self,
-            test: 1,
-            retain: 0,
-        };
-        while g.test < g.vec.len() {
-            unsafe {
-                let test_ptr = g.vec.as_mut_ptr().add(g.test);
-                let retain_ptr = g.vec.as_mut_ptr().add(g.retain);
-                if same_bucket(&mut *test_ptr, &mut *retain_ptr) {
-                    // Advance index now to correctly clean holes if Drop panic.
-                    // This will mark dropped element as a hole.
-                    g.test += 1;
-
-                    drop_in_place(test_ptr);
-                } else {
-                    let hole = g.vec.as_mut_ptr().add(g.retain + 1);
-                    if g.retain + 1 != g.test {
-                        ptr::copy_nonoverlapping(test_ptr, hole, 1);
-                    }
-
-                    g.retain += 1;
-                    g.test += 1;
-                }
-            }
-        }
-
-        drop(g);
+    pub unsafe fn set_len(&mut self, new_len: usize) {
+        debug_assert!(self.capacity() > new_len);
+        self.len = new_len;
     }
 
     #[inline]
-    pub fn dedup_by_key<K: PartialEq>(&mut self, mut key: impl FnMut(&mut T) -> K) {
-        self.dedup_by(|a, b| key(a) == key(b))
+    pub fn as_slice(&self) -> &[T] {
+        self
     }
 
     #[inline]
-    pub fn push(&mut self, element: T) {
-        if self.len == self.cap {
-            self.reserve(1);
-        }
-
-        unsafe {
-            let end = self.as_mut_ptr().add(self.len);
-            ptr::write(end, element);
-            self.len += 1;
-        }
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        self
     }
 
     #[inline]
-    pub fn pop(&mut self) -> Option<T> {
-        if self.len > 0 {
-            unsafe {
-                self.len -= 1;
-                let end = self.as_ptr().add(self.len);
-                let element = ptr::read(end);
-                Some(element)
-            }
-        } else {
-            None
-        }
+    pub fn as_ptr(&self) -> *const T {
+        self.as_slice().as_ptr()
     }
 
-    pub fn append(&mut self, other: &mut Self) {
-        #[cold]
-        fn panic_overflow() -> ! {
-            panic!("after append the length of the final Vec would overflow usize");
-        }
-
-        if let Some(new_len) = self.len.checked_add(other.len) {
-            unsafe {
-                self.reserve(other.len);
-                let other_ptr = other.as_ptr();
-                let self_ptr = self.as_mut_ptr().add(self.len);
-                ptr::copy_nonoverlapping(other_ptr, self_ptr, other.len);
-                self.set_len(new_len);
-                other.set_len(0);
-            }
-        } else {
-            panic_overflow()
-        }
+    #[inline]
+    pub fn as_mut(&mut self) -> *mut T {
+        self.as_mut_slice().as_mut_ptr()
     }
 
     #[inline]
@@ -443,23 +122,332 @@ impl<T: 'static> Vec<T> {
     }
 
     #[inline]
-    pub fn dedup(&mut self) where T: PartialEq {
-        self.dedup_by(|a, b| a == b)
+    pub fn spare_capacity(&self) -> &[MaybeUninit<T>] {
+        unsafe {
+            let slice_ptr = self.ptr.access().as_ptr();
+            let after_slice_ptr = slice_ptr.add(self.len()) as _;
+            slice::from_raw_parts(after_slice_ptr, self.spare_len())
+        }
+    }
+
+    #[inline]
+    pub fn spare_capacity_mut(&mut self) -> &mut [MaybeUninit<T>] {
+        unsafe {
+            let slice_ptr = self.ptr.access_mut().as_mut_ptr();
+            let after_slice_ptr = slice_ptr.add(self.len()) as _;
+            slice::from_raw_parts_mut(after_slice_ptr, self.spare_len())
+        }
+    }
+
+    #[inline]
+    pub fn spare_len(&self) -> usize {
+        self.capacity() - self.len()
+    }
+
+    #[inline]
+    pub fn reserve(&mut self, additional: usize) {
+        self.try_reserve(additional).unwrap();
+    }
+
+    #[inline]
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
+        let required_cap = self.len.overflow_guarded_add(additional);
+        if self.capacity() < required_cap {
+            self.grow_amortized(required_cap).map_err(|e| e.into())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[inline]
+    pub fn reserve_exact(&mut self, additional: usize) {
+        self.try_reserve_exact(additional).unwrap();
+    }
+
+    #[inline]
+    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), TryReserveError> {
+        let required_cap = self.len.overflow_guarded_add(additional);
+        if self.capacity() < required_cap {
+            self.grow_exact(required_cap).map_err(|e| e.into())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cold]
+    fn grow_amortized(&mut self, new_capacity: usize) -> Result<(), ArrayAllocError> {
+        // This is ensured by the calling contexts.
+        debug_assert!(self.capacity() < new_capacity);
+
+        let new_capacity = cmp::max(new_capacity, Self::MIN_NON_ZERO_CAP);
+        let new_capacity = cmp::max(new_capacity, self.capacity() * 2);
+
+        self.grow_exact(new_capacity)
+    }
+
+    #[cold]
+    fn grow_exact(&mut self, new_capacity: usize) -> Result<(), ArrayAllocError> {
+        // This is ensured by the calling contexts.
+        debug_assert!(self.capacity() < new_capacity);
+        unsafe { self.ptr.realloc_array(new_capacity) }
+    }
+
+    #[cold]
+    fn shrink(&mut self, capacity: usize) -> Result<(), ArrayAllocError> {
+        // This is ensured by the calling contexts.
+        debug_assert!(self.capacity() > capacity);
+        debug_assert!(self.len <= capacity);
+        if size_of::<T>() == 0 {
+            return Ok(());
+        }
+
+        unsafe { self.ptr.realloc_array(capacity) }
+    }
+
+    #[inline]
+    pub fn shrink_to_fit(&mut self) {
+        if self.len() < self.capacity() {
+            self.shrink(self.len()).unwrap();
+        }
+    }
+
+    #[inline]
+    pub fn shrink_to(&mut self, min_capacity: usize) {
+        let capacity = cmp::max(self.len(), min_capacity);
+        if self.capacity() > capacity {
+            self.shrink(capacity).unwrap();
+        }
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        for i in 0..self.len() {
+            // SAFETY: we iterate in the initialized range bound by length parameter and
+            // so the values are correct.
+            let ptr = unsafe { self.get_unchecked_mut(i) };
+            // SAFETY: value in the array is valid to be dropped at this point.
+            unsafe {
+                drop_in_place(ptr);
+            }
+        }
+        // SAFETY: length is for sure less than or equal to the capacity here.
+        unsafe {
+            self.set_len(0);
+        }
+    }
+
+    #[inline]
+    pub fn push(&mut self, val: T) {
+        self.reserve(1);
+        let slice_ptr = self.as_mut_ptr();
+        // SAFETY: offset address is assured to be correct by reserve function.
+        // Reserve would otherwise fail if it was not possible to locate the value in that address
+        // range.
+        let insert_ptr = unsafe { slice_ptr.add(self.len()) };
+        // SAFETY: ptr is within recently reserved memory region.
+        unsafe {
+            *insert_ptr = val;
+        }
+        // SAFETY: we reserved at least one element so this length will be correct and will
+        // cover recently stored value.
+        unsafe {
+            self.set_len(self.len() + 1);
+        }
+    }
+
+    #[inline]
+    pub fn pop(&mut self) -> Option<T> {
+        if self.is_empty() {
+            None
+        } else {
+            // SAFETY: len is positive as we checked array is not empty. Index is within
+            // valid range as it is below len.
+            unsafe {
+                let ptr = self.get_unchecked(self.len() - 1);
+                let val = ptr::read(ptr);
+                self.set_len(self.len() - 1);
+                Some(val)
+            }
+        }
+    }
+
+    #[inline]
+    pub fn leak(mut self) -> &'static mut [T] {
+        // SAFETY: Vec is used in some scope and slice is 'static in it as it will not be
+        // ever deallocated when leaked within the scope lifetime.
+        unsafe { impose_lifetime_mut(&mut self) }
+    }
+
+    #[inline]
+    pub fn append(&mut self, other: &mut Self) {
+        self.reserve(other.len());
+        // SAFETY: ptr is within valid reserved range.
+        let self_end_ptr = unsafe { self.as_mut_ptr().add(self.len()) as *mut T };
+        let other_ptr = other.as_ptr();
+        // SAFETY: memory ranges of different Vec are non-overlapping, aligned, and
+        // we reserved required space in current Vec.
+        unsafe {
+            copy_nonoverlapping(other_ptr, self_end_ptr, other.len());
+            self.set_len(self.len() + other.len());
+            other.set_len(0);
+        }
+    }
+
+    #[inline]
+    pub fn extend_from_slice(&mut self, slice: &[T])
+    where
+        T: Clone,
+    {
+        self.reserve(slice.len());
+        for i in slice {
+            self.push(i.clone());
+        }
+    }
+
+    #[inline]
+    pub fn swap_remove(&mut self, index: usize) -> T {
+        assert!(self.len() > index);
+
+        if self.len() == 1 {
+            self.pop().unwrap()
+        } else {
+            // SAFETY: index was asserted to be within array range.
+            let elem_ptr: *mut T = unsafe { self.get_unchecked_mut(index) };
+            // SAFETY: index is within array range and does not underflow as len is positive.
+            let last = self.len() - 1;
+            let last_ptr: *mut T = unsafe { self.get_unchecked_mut(last) };
+            // SAFETY: pointers are valid and non-overlapping.
+            unsafe {
+                let val = ptr::read(elem_ptr);
+                copy_nonoverlapping(last_ptr, elem_ptr, 1);
+                val
+            }
+        }
     }
 }
 
-#[cold]
-fn capacity_overflow() -> ! {
-    panic!("capacity overflow");
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TryReserveError(ArrayAllocError);
+
+impl From<ArrayAllocError> for TryReserveError {
+    fn from(e: ArrayAllocError) -> Self {
+        TryReserveError(e)
+    }
 }
 
-struct CapacityOverflowError;
+impl<T: 'static> Default for Vec<T> {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-#[inline]
-fn alloc_guard(alloc_size: usize) -> Result<(), CapacityOverflowError> {
-    if usize::BITS < 64 && alloc_size > isize::MAX as usize {
-        Err(CapacityOverflowError)
-    } else {
-        Ok(())
+impl<T: 'static> Deref for Vec<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        self.ptr.access()
+    }
+}
+
+impl<T: 'static> DerefMut for Vec<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.ptr.access_mut()
+    }
+}
+
+impl<T: 'static> Borrow<[T]> for Vec<T> {
+    fn borrow(&self) -> &[T] {
+        self.ptr.access()
+    }
+}
+
+impl<T: 'static> BorrowMut<[T]> for Vec<T> {
+    fn borrow_mut(&mut self) -> &mut [T] {
+        self.ptr.access_mut()
+    }
+}
+
+impl<T: 'static> AsRef<[T]> for Vec<T> {
+    fn as_ref(&self) -> &[T] {
+        self.ptr.access()
+    }
+}
+
+impl<T: 'static> AsMut<[T]> for Vec<T> {
+    fn as_mut(&mut self) -> &mut [T] {
+        self.ptr.access_mut()
+    }
+}
+
+impl<T: Clone + 'static> Clone for Vec<T> {
+    fn clone(&self) -> Self {
+        let mut vec = Vec::new();
+        vec.extend_from_slice(self);
+        vec
+    }
+}
+
+impl<T: 'static, I: SliceIndex<[T]>> Index<I> for Vec<T> {
+    type Output = I::Output;
+
+    fn index(&self, index: I) -> &Self::Output {
+        self.as_slice().index(index)
+    }
+}
+
+impl<T: 'static, I: SliceIndex<[T]>> IndexMut<I> for Vec<T> {
+    fn index_mut(&mut self, index: I) -> &mut Self::Output {
+        self.as_mut_slice().index_mut(index)
+    }
+}
+
+impl<T: PartialEq + 'static> PartialEq for Vec<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl<T: PartialEq + Eq + 'static> Eq for Vec<T> {}
+
+impl<T: PartialOrd + 'static> PartialOrd for Vec<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        self.as_slice().partial_cmp(other.as_slice())
+    }
+}
+
+impl<T: Ord + 'static> Ord for Vec<T> {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.as_slice().cmp(other.as_slice())
+    }
+}
+
+impl<T: Hash + 'static> Hash for Vec<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state)
+    }
+}
+
+impl<T: 'static> Drop for Vec<T> {
+    fn drop(&mut self) {
+        for i in 0..self.len() {
+            unsafe { drop_in_place(self.get_unchecked_mut(i)) }
+        }
+        unsafe { self.ptr.dealloc(); }
+    }
+}
+
+trait OverflowGuardedAdd {
+    /// Guard the value from overflowing. Use when calculating array capacity or length
+    /// to be safe from overflowing. If overflow occurs the add will panic.
+    fn overflow_guarded_add(&self, rhs: Self) -> Self;
+}
+
+impl OverflowGuardedAdd for usize {
+    #[track_caller]
+    #[inline]
+    fn overflow_guarded_add(&self, rhs: Self) -> Self {
+        self.checked_add(rhs)
+            .unwrap_or_else(|| panic!("{:?}", ArrayAllocError::CapacityOverflow))
     }
 }

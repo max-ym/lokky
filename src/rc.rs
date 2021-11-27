@@ -116,7 +116,7 @@ impl<T: 'static> Rc<T> {
         Rc(ManuallyDrop::new(ScopeAccess::alloc(
             b,
             AllocSelector::new::<T>(),
-        )))
+        ).unwrap()))
     }
 
     pub fn try_unwrap(this: Rc<T>) -> Result<T, Self> {

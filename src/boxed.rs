@@ -8,14 +8,14 @@ pub struct Box<T: ?Sized>(pub(crate) ScopeAccess<T>);
 
 impl<T: 'static> Box<T> {
     pub fn new(x: T) -> Self {
-        Box(ScopeAccess::alloc(x, AllocSelector::new::<T>()))
+        Box(ScopeAccess::alloc(x, AllocSelector::new::<T>()).unwrap())
     }
 
     pub fn new_with(x: T, marker: AllocMarker) -> Self {
         Box(ScopeAccess::alloc(
             x,
             AllocSelector::with_marker::<T>(marker),
-        ))
+        ).unwrap())
     }
 
     pub fn into_inner(self) -> T {
