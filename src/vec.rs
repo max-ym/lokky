@@ -1,15 +1,7 @@
-use core::{
-    borrow::{Borrow, BorrowMut},
-    cmp,
-    hash::{Hash, Hasher},
-    mem::{size_of, MaybeUninit},
-    ops::{Deref, DerefMut, Index, IndexMut},
-    ptr::{self, copy_nonoverlapping, drop_in_place},
-    slice::{self, SliceIndex},
-};
+use core::{borrow::{Borrow, BorrowMut}, cmp, hash::{Hash, Hasher}, mem::{self, MaybeUninit, size_of}, ops::{Deref, DerefMut, Index, IndexMut}, ptr::{self, copy_nonoverlapping, drop_in_place}, slice::{self, SliceIndex}};
 
 use super::*;
-use crate::{marker::impose_lifetime_mut, scope::AllocSelector};
+use crate::{marker::impose_lifetime_mut, scope::{AllocMarker, AllocSelector}};
 
 pub struct Vec<T: 'static> {
     ptr: ScopeAccess<[T]>,
@@ -32,7 +24,13 @@ impl<T: 'static> Vec<T> {
 
     #[inline]
     pub fn new() -> Self {
-        let alloc = scope::current().alloc_for(AllocSelector::new::<T>());
+        Self::new_for(Default::default())
+    }
+
+    #[inline]
+    pub fn new_for(marker: AllocMarker) -> Self {
+        let alloc = scope::current()
+            .alloc_for(AllocSelector::with_marker::<T>(marker));
         // SAFETY: when capacity is set to zero ptr will never be accessed and may safely
         // remain dangling.
         let ptr = unsafe { ScopeAccess::<T>::dangling(alloc, Default::default()) };
@@ -48,11 +46,21 @@ impl<T: 'static> Vec<T> {
     }
 
     #[inline]
+    pub fn with_capacity_for(marker: AllocMarker, capacity: usize) -> Self {
+        Self::try_with_capacity_for(marker, capacity).unwrap()
+    }
+
+    #[inline]
     pub fn try_with_capacity(capacity: usize) -> Result<Self, ArrayAllocError> {
+        Self::try_with_capacity_for(Default::default(), capacity)
+    }
+
+    #[inline]
+    pub fn try_with_capacity_for(marker: AllocMarker, capacity: usize) -> Result<Self, ArrayAllocError> {
         if capacity == 0 || size_of::<T>() == 0 {
-            Ok(Vec::new())
+            Ok(Vec::new_for(marker))
         } else {
-            let selector = AllocSelector::new::<T>();
+            let selector = AllocSelector::with_marker::<T>(marker);
             let ptr = ScopeAccess::alloc_array_uninit(capacity, selector)?;
             Ok(Vec { ptr, len: 0 })
         }
@@ -237,7 +245,7 @@ impl<T: 'static> Vec<T> {
     }
 
     #[inline]
-    pub fn push(&mut self, val: T) {
+    pub fn push(&mut self, element: T) {
         self.reserve(1);
         let slice_ptr = self.as_mut_ptr();
         // SAFETY: offset address is assured to be correct by reserve function.
@@ -246,7 +254,7 @@ impl<T: 'static> Vec<T> {
         let insert_ptr = unsafe { slice_ptr.add(self.len()) };
         // SAFETY: ptr is within recently reserved memory region.
         unsafe {
-            *insert_ptr = val;
+            ptr::write(insert_ptr, element);
         }
         // SAFETY: we reserved at least one element so this length will be correct and will
         // cover recently stored value.
@@ -322,6 +330,106 @@ impl<T: 'static> Vec<T> {
                 copy_nonoverlapping(last_ptr, elem_ptr, 1);
                 val
             }
+        }
+    }
+
+    #[inline]
+    pub fn into_boxed_slice(mut self) -> crate::boxed::Box<[T]> {
+        // Make slice be the same length as capacity. This would split off all possibly
+        // uninitialized values that are there because of mismatch of length and
+        // capacity.
+        self.shrink_to_fit();
+        
+        let access = unsafe { self.ptr.clone() };
+        // Avoid normal Drop of Vec.
+        mem::forget(self);
+
+        crate::boxed::Box(access)
+    }
+
+    #[inline]
+    pub fn split_off(&mut self, at: usize) -> Self {
+        if self.len() <= at {
+            Vec::new()
+        } else {
+            let count = self.len() - at;
+            let mut vec = Vec::with_capacity(count);
+            let vec_ptr = vec.as_mut_ptr();
+            // SAFETY: we checked above that `at` is within array range.
+            let at_ptr = unsafe { self.get_unchecked(at) };
+
+            unsafe { copy_nonoverlapping(at_ptr, vec_ptr, count); }
+            vec
+        }
+    }
+
+    #[inline]
+    pub fn is_full(&self) -> bool {
+        self.len() == self.capacity()
+    }
+
+    #[inline]
+    pub fn insert(&mut self, index: usize, element: T) {
+        assert!(index <= self.len());
+
+        if self.is_full() {
+            self.reserve(1);
+        }
+
+        unsafe {
+            let insert_ptr: *mut T = self.get_unchecked_mut(index);
+            // Shift everything over to make space. (Duplicating the
+            // `index`th element into two consecutive places.)
+            ptr::copy(insert_ptr, insert_ptr.add(1), self.len() - index);
+            ptr::write(insert_ptr, element);
+        }
+    }
+
+    pub fn truncate(&mut self, len: usize) {
+        // Note: It's intentional that this is `>` and not `>=`.
+        //       Changing it to `>=` has negative performance
+        //       implications in some cases. See #78884 for more.
+        if len > self.len() {
+            return;
+        }
+
+        // This is safe because:
+        //
+        // * the slice passed to `drop_in_place` is valid; the `len > self.len`
+        //   case avoids creating an invalid slice, and
+        // * the `len` of the vector is shrunk before calling `drop_in_place`,
+        //   such that no value will be dropped twice in case `drop_in_place`
+        //   were to panic once (if it panics twice, the program aborts).
+        unsafe {
+            let remaining_len = self.len() - len;
+            let s = ptr::slice_from_raw_parts_mut(
+                self.as_mut_ptr().add(len), 
+                remaining_len,
+            );
+            self.set_len(len);
+            ptr::drop_in_place(s);
+        }
+    }
+
+    pub fn remove(&mut self, index: usize) -> T {
+        assert!(index < self.len());
+
+        unsafe {
+            let elem_ptr: *mut T = self.get_unchecked_mut(index);
+            let next_ptr = elem_ptr.add(1);
+            
+            // Copy element out, unsafely having a copy of the value on
+            // the stack and in the vector at the same time.
+            let elem = ptr::read(elem_ptr);
+
+            // Shift everything down to fill that spot in the vector.
+            ptr::copy(next_ptr, elem_ptr, self.len() - index - 1);
+
+            // Now only stack has the value.
+            // Decrease length to account for the removed element.
+            self.set_len(self.len() - 1);
+
+            elem
         }
     }
 }
@@ -434,6 +542,62 @@ impl<T: 'static> Drop for Vec<T> {
             unsafe { drop_in_place(self.get_unchecked_mut(i)) }
         }
         unsafe { self.ptr.dealloc(); }
+    }
+}
+
+impl<T: Clone> From<&[T]> for Vec<T> {
+    fn from(slice: &[T]) -> Self {
+        let mut vec = Vec::new();
+        vec.clone_from_slice(slice);
+        vec
+    }
+}
+
+impl<T: Clone> From<&mut [T]> for Vec<T> {
+    fn from(slice: &mut [T]) -> Self {
+        Vec::from(&*slice)
+    }
+}
+
+impl<T, const N: usize> From<[T; N]> for Vec<T> {
+    fn from(slice: [T; N]) -> Self {
+        let mut vec = Vec::new();
+        let slice_ptr = slice.as_ptr();
+        let vec_ptr = vec.as_mut_ptr();
+
+        unsafe {
+            // Resize Vec to be able to hold new copied elements.
+            vec.reserve(N);
+            // Copy all data from slice to Vec.
+            ptr::copy_nonoverlapping(slice_ptr, vec_ptr, N);
+            // Set correct amount of elements.
+            vec.set_len(N);
+            // Forget the slice to avoid dropping. All this effectively just moves the elements
+            // to Vec.
+            mem::forget(slice);
+        }
+        
+        vec
+    }
+}
+
+impl<T> From<crate::boxed::Box<[T]>> for Vec<T> {
+    fn from(boxed: crate::boxed::Box<[T]>) -> Self {
+        let len = boxed.0.access().len();
+        Vec { ptr: boxed.0, len }
+    }
+}
+
+impl<T> FromIterator<T> for Vec<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let iter = iter.into_iter();
+        let mut vec = Vec::with_capacity(iter.size_hint().0);
+
+        for item in iter {
+            vec.push(item);
+        }
+
+        vec
     }
 }
 
