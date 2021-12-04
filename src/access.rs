@@ -1,8 +1,9 @@
 use crate::marker::Scoped;
 use crate::scope::{AllocMarker, AllocSelector};
+use crate::trace;
 use core::alloc::{GlobalAlloc, Layout};
 use core::marker::PhantomData;
-use core::mem::{transmute};
+use core::mem::{self, transmute, size_of};
 use core::ptr::NonNull;
 use core::{ptr, slice};
 
@@ -62,6 +63,7 @@ impl<T: ?Sized> AccessMut<T> for ScopeAccess<T> {
 
 impl<T: ?Sized> Drop for ScopeAccess<T> {
     fn drop(&mut self) {
+        trace!("dropping ScopeAccess ({:#?})", self.ptr.as_ptr());
         unsafe {
             self.ptr.as_ptr().drop_in_place();
             self.dealloc();
@@ -78,6 +80,7 @@ impl<T: ?Sized> ScopeAccess<T> {
     /// * provided allocator was actually the one used to allocate given pointed-to value
     /// * allocator marker should be valid and actually used for given allocation
     pub unsafe fn new(ptr: NonNull<T>, alloc: &dyn GlobalAlloc, alloc_marker: AllocMarker) -> Self {
+        trace!("new ScopeAccess {:#?}", ptr.as_ptr());
         ScopeAccess {
             ptr,
             alloc: transmute(alloc),
@@ -93,12 +96,14 @@ impl<T: ?Sized> ScopeAccess<T> {
     /// The data should be correctly aligned. The pointed-to data will be reinterpreted as if it
     /// has the other type which may lead to undefined behaviour.
     pub unsafe fn cast<O>(self) -> ScopeAccess<O> {
-        ScopeAccess {
+        let access = ScopeAccess {
             ptr: self.ptr.cast(),
             alloc: self.alloc.clone(),
             alloc_marker: self.alloc_marker,
             _marker: Default::default(),
-        }
+        };
+        mem::forget(self);
+        access
     }
 
     /// Change the access to the value to access to the array of values.
@@ -110,12 +115,14 @@ impl<T: ?Sized> ScopeAccess<T> {
     where
         T: Sized,
     {
-        ScopeAccess {
+        let access = ScopeAccess {
             ptr: NonNull::new_unchecked(slice::from_raw_parts_mut(self.ptr.as_ptr(), len)),
             alloc: self.alloc.clone(),
             alloc_marker: self.alloc_marker,
             _marker: Default::default(),
-        }
+        };
+        mem::forget(self);
+        access
     }
 
     /// Change the access to the value to access to the array of values. 
@@ -161,7 +168,9 @@ impl<T: ?Sized> ScopeAccess<T> {
     }
 
     /// Forget the value without running any destructor or deallocating memory.
-    pub fn forget(self) {}
+    pub fn forget(self) {
+        mem::forget(self)
+    }
 }
 
 impl<T: 'static + ?Sized> ScopeAccess<T> {
@@ -192,6 +201,7 @@ impl<T> ScopeAccess<T> {
     /// Allocate memory using given `Layout` and `AllocQuery`.
     fn alloc_layout(layout: Layout, selector: AllocSelector) -> Result<Self, AllocError> {
         let alloc = crate::scope::current().alloc_for(selector);
+        trace!("alloc with {:?}", &layout);
         let mem = unsafe { alloc.alloc(layout) as *mut T };
         if let Some(ptr) = NonNull::new(mem) {
             // SAFETY: all parameters are guaranteed to be correct in the code above.
@@ -233,6 +243,7 @@ impl<T: ?Sized> ScopeAccess<T> {
     /// # Safety
     /// Memory should not be accessed and Drop execution should be prevented.
     pub unsafe fn dealloc(&mut self) {
+        trace!("dealloc ScopeAccess {:#?}", self.ptr.as_ptr());
         self.alloc.dealloc(self.ptr.as_ptr() as _, Layout::for_value(self.ptr.as_ref()));
     }
 }
@@ -257,10 +268,13 @@ impl<T> ScopeAccess<[T]> {
     /// values and caller must ensure those are not read from or else undefined behaviour.
     pub unsafe fn realloc_array(&mut self, new_capacity: usize) -> Result<(), ArrayAllocError> {
         use ArrayAllocError::*;
+        trace!("realloc array");
         let ptr = self.alloc.realloc(
             self.ptr.as_ptr() as _,
+            // TODO: use unwrap_unchecked instead when stable (issue 81383).
+            // SAFETY: we already constructed such Layout before to allocate - it will not fail.
             Layout::array::<T>(self.access().len()).map_err(|_| CapacityOverflow)?,
-            new_capacity,
+            new_capacity * size_of::<T>(),
         );
         if ptr.is_null() {
             Err(AllocError(super::AllocError))

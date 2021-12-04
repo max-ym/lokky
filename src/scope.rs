@@ -1,11 +1,11 @@
-use crate::marker::{impose_lifetime_mut, ScopedMut};
+use crate::marker::{impose_lifetime_mut, ScopedMut, UnsafeInto};
 use core::alloc::GlobalAlloc;
 use core::any::TypeId;
 use core::mem::transmute_copy;
 
 /// Function to resolve Env for current application. It should be initialized before using
 /// scopes and types that rely on scope information.
-pub static ENV: Option<fn() -> &'static mut Env> = None;
+pub static mut ENV: Option<fn() -> &'static mut Env> = None;
 
 /// Environment of scopes. Provides types information about current variables and allocators.
 pub struct Env {
@@ -97,16 +97,22 @@ pub trait Scope {
 }
 
 impl Env {
+    pub fn new(scope: &mut (dyn Scope + 'static)) -> Self {
+        Env {
+            cur: unsafe { scope.unsafe_into() },
+        }
+    }
+
     /// Spawn new scope to execute function in it.
     pub fn spawn<T, S: 'static>(
         &mut self,
-        scope_init: impl FnOnce(&dyn Scope) -> S,
-        f: impl FnOnce(&mut S) -> T,
+        mut scope_init: impl FnMut(&dyn Scope) -> S,
+        mut f: impl FnMut(&mut S) -> T,
     ) -> T
     where
         S: Scope,
     {
-        use crate::marker::{UnsafeFrom, UnsafeInto};
+        use crate::marker::{UnsafeFrom};
         unsafe {
             // SAFETY: we definitely know the lifetime will be valid during scope execution.
             let prev: &mut dyn Scope = impose_lifetime_mut(self.cur.as_mut());
@@ -127,21 +133,24 @@ impl Env {
     }
 }
 
+#[inline]
 fn env() -> &'static Env {
-    ENV.unwrap()()
+    unsafe { ENV.unwrap()() }
 }
 
+#[inline]
 fn env_mut() -> &'static mut Env {
-    ENV.unwrap()()
+    unsafe { ENV.unwrap()() }
 }
 
+#[inline]
 pub fn current() -> &'static dyn Scope {
     env().current()
 }
 
 pub fn spawn<T, S: Scope + 'static>(
-    scope_init: impl FnOnce(&dyn Scope) -> S,
-    f: impl FnOnce(&mut S) -> T,
+    scope_init: impl FnMut(&dyn Scope) -> S,
+    f: impl FnMut(&mut S) -> T,
 ) -> T {
     env_mut().spawn(scope_init, f)
 }

@@ -3,6 +3,8 @@
 #[cfg(not(feature = "no_std"))]
 extern crate std;
 
+mod test_log;
+
 mod access;
 pub use access::*;
 

@@ -3,7 +3,7 @@ use core::{
     cmp,
     hash::{Hash, Hasher},
     iter::FusedIterator,
-    mem::{self, size_of, MaybeUninit},
+    mem::{self, size_of, MaybeUninit, ManuallyDrop},
     ops::{Deref, DerefMut, Index, IndexMut, RangeBounds},
     ptr::{self, copy_nonoverlapping, drop_in_place},
     slice::{self, SliceIndex},
@@ -14,10 +14,11 @@ use crate::{
     boxed::Box,
     marker::impose_lifetime_mut,
     scope::{AllocMarker, AllocSelector},
+    trace,
 };
 
 pub struct Vec<T: 'static> {
-    ptr: ScopeAccess<[T]>,
+    ptr: ManuallyDrop<ScopeAccess<[T]>>,
     len: usize,
 }
 
@@ -50,7 +51,7 @@ impl<T: 'static> Vec<T> {
         // but we can cast later to ScopeAccess<[T]>.
         let ptr = unsafe { ScopeAccess::<T>::dangling(alloc, Default::default()) };
         Vec {
-            ptr: unsafe { ptr.cast_to_slice(0) },
+            ptr: unsafe { ManuallyDrop::new(ptr.cast_to_slice(0)) },
             len: 0,
         }
     }
@@ -78,8 +79,9 @@ impl<T: 'static> Vec<T> {
         if capacity == 0 || size_of::<T>() == 0 {
             Ok(Vec::with_marker(marker))
         } else {
+            trace!("try alloc for type size {} with capacity {}", size_of::<T>(), capacity);
             let selector = AllocSelector::with_marker::<T>(marker);
-            let ptr = ScopeAccess::alloc_array_uninit(capacity, selector)?;
+            let ptr = ManuallyDrop::new(ScopeAccess::alloc_array_uninit(capacity, selector)?);
             Ok(Vec { ptr, len: 0 })
         }
     }
@@ -118,18 +120,20 @@ impl<T: 'static> Vec<T> {
     /// [`capacity()`]: Vec::capacity
     #[inline]
     pub unsafe fn set_len(&mut self, new_len: usize) {
-        debug_assert!(self.capacity() > new_len);
+        debug_assert!(self.capacity() >= new_len);
         self.len = new_len;
     }
 
     #[inline]
     pub fn as_slice(&self) -> &[T] {
-        self
+        let ptr = self.ptr.access().as_ptr();
+        unsafe { slice::from_raw_parts(ptr, self.len) }
     }
 
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        self
+        let ptr = self.ptr.access_mut().as_mut_ptr();
+        unsafe { slice::from_raw_parts_mut(ptr, self.len) }
     }
 
     #[inline]
@@ -215,7 +219,14 @@ impl<T: 'static> Vec<T> {
     fn grow_exact(&mut self, new_capacity: usize) -> Result<(), ArrayAllocError> {
         // This is ensured by the calling contexts.
         debug_assert!(self.capacity() < new_capacity);
-        unsafe { self.ptr.realloc_array(new_capacity) }
+
+        trace!("grow from {} to {}", self.capacity(), new_capacity);
+        if self.capacity() == 0 {
+            *self = Vec::try_with_capacity_and_marker(new_capacity, self.ptr.marker())?;
+            Ok(())
+        } else {
+            unsafe { self.ptr.realloc_array(new_capacity) }
+        }
     }
 
     #[cold]
@@ -347,6 +358,7 @@ impl<T: 'static> Vec<T> {
             unsafe {
                 let val = ptr::read(elem_ptr);
                 copy_nonoverlapping(last_ptr, elem_ptr, 1);
+                self.set_len(self.len() - 1);
                 val
             }
         }
@@ -401,6 +413,8 @@ impl<T: 'static> Vec<T> {
             // `index`th element into two consecutive places.)
             ptr::copy(insert_ptr, insert_ptr.add(1), self.len() - index);
             ptr::write(insert_ptr, element);
+
+            self.set_len(self.len() + 1);
         }
     }
 
@@ -496,6 +510,13 @@ impl<T: 'static> Vec<T> {
         }
     }
 
+    pub fn dedup(&mut self) 
+    where
+        T: PartialEq,
+    {
+        self.dedup_by(|a, b| PartialEq::eq(a, b))
+    }
+
     pub fn dedup_by_key<K: PartialEq>(&mut self, mut key: impl FnMut(&mut T) -> K) {
         let mut prev_key = if let Some(first) = self.get_mut(0) {
             key(first)
@@ -526,7 +547,8 @@ impl<T: 'static> Vec<T> {
         // Shadow `same_bucket` to accept pointers. We use those to avoid errors of
         // borrowing `vec` both mutable and immutable at the same time.
         //
-        // SAFETY: two pointer do not access the same data in this context.
+        // SAFETY: no references/pointers do not access the same data in this context.
+        // Race condition cannot occur.
         let mut same_bucket =
             |tested: *mut T, keeped: *mut T| unsafe { same_bucket(&mut *tested, &mut *keeped) };
 
@@ -690,19 +712,24 @@ impl<'a, T: 'static> RetainIter<'a, T> {
         let initial_len = vec.len();
         // Set len to 0 in case drop panics so that invalid elements could not be
         // accessed. Len will increase gradually as new elements gets processed.
-        unsafe {
-            vec.set_len(0);
-        }
-        let mut iter = RetainIter {
-            write: 0,
-            read: 1,
-            vec,
-            initial_len,
-        };
+        unsafe { vec.set_len(0) };
         if discard_first {
-            iter.discard_next();
+            unsafe { drop_in_place(vec.get_unchecked_mut(0)) };
+            RetainIter {
+                write: 0,
+                read: 1,
+                vec,
+                initial_len,
+            }
+        } else {
+            unsafe { vec.set_len(1) };
+            RetainIter {
+                write: 1,
+                read: 2,
+                vec,
+                initial_len,
+            }
         }
-        iter
     }
 
     fn has_next(&self) -> bool {
@@ -774,37 +801,37 @@ impl<T: 'static> Deref for Vec<T> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
-        self.ptr.access()
+        self.as_slice()
     }
 }
 
 impl<T: 'static> DerefMut for Vec<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.ptr.access_mut()
+        self.as_mut_slice()
     }
 }
 
 impl<T: 'static> Borrow<[T]> for Vec<T> {
     fn borrow(&self) -> &[T] {
-        self.ptr.access()
+        self.as_slice()
     }
 }
 
 impl<T: 'static> BorrowMut<[T]> for Vec<T> {
     fn borrow_mut(&mut self) -> &mut [T] {
-        self.ptr.access_mut()
+        self.as_mut_slice()
     }
 }
 
 impl<T: 'static> AsRef<[T]> for Vec<T> {
     fn as_ref(&self) -> &[T] {
-        self.ptr.access()
+        self.as_slice()
     }
 }
 
 impl<T: 'static> AsMut<[T]> for Vec<T> {
     fn as_mut(&mut self) -> &mut [T] {
-        self.ptr.access_mut()
+        self.as_mut_slice()
     }
 }
 
@@ -858,10 +885,16 @@ impl<T: Hash + 'static> Hash for Vec<T> {
 
 impl<T: 'static> Drop for Vec<T> {
     fn drop(&mut self) {
-        for i in 0..self.len() {
-            unsafe { drop_in_place(self.get_unchecked_mut(i)) };
+        if self.capacity() > 0 {
+            trace!("dropping Vec");
+            for i in 0..self.len() {
+                unsafe { drop_in_place(self.get_unchecked_mut(i)) };
+            }
+            unsafe { self.ptr.dealloc() };
+        } else {
+            trace!("dropped Vec (unallocated)");
+            // Not allocated. Nothing to drop.
         }
-        unsafe { self.ptr.dealloc() };
     }
 }
 
@@ -904,7 +937,7 @@ impl<T, const N: usize> From<[T; N]> for Vec<T> {
 impl<T> From<Box<[T]>> for Vec<T> {
     fn from(boxed: Box<[T]>) -> Self {
         let len = boxed.0.access().len();
-        Vec { ptr: boxed.0, len }
+        Vec { ptr: ManuallyDrop::new(boxed.0), len }
     }
 }
 
@@ -1022,5 +1055,270 @@ impl OverflowGuardedAdd for usize {
     fn overflow_guarded_add(&self, rhs: Self) -> Self {
         self.checked_add(rhs)
             .unwrap_or_else(|| panic!("{:?}", ArrayAllocError::CapacityOverflow))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use jemallocator::Jemalloc;
+    use log::LevelFilter;
+
+    use super::*;
+
+    struct DummyScope(Jemalloc);
+    impl scope::Scope for DummyScope {
+        fn alloc_for(&self, _selector: AllocSelector) -> &dyn core::alloc::GlobalAlloc {
+            &self.0
+        }
+    }
+
+    static mut SCOPE: MaybeUninit<DummyScope> = MaybeUninit::uninit();
+    static mut ENV: MaybeUninit<scope::Env> = MaybeUninit::uninit();
+
+    fn env() -> &'static mut scope::Env {
+        unsafe { ENV.assume_init_mut() }
+    }
+
+    fn init() {
+        use simplelog::{TermLogger, Config, TerminalMode, ColorChoice};
+        let _ = TermLogger::init(
+            LevelFilter::Trace,
+            Config::default(),
+            TerminalMode::Stdout,
+             ColorChoice::Auto,
+        );
+        unsafe {
+            SCOPE = MaybeUninit::new(DummyScope(Jemalloc));
+            ENV = MaybeUninit::new(scope::Env::new(SCOPE.assume_init_mut()));
+            scope::ENV = Some(env);
+        }
+    }
+
+    #[test]
+    fn create_vec() {
+        init();
+        Vec::<usize>::new();
+    }
+
+    #[test]
+    fn create_with_capacity() {
+        init();
+        let vec = Vec::<u8>::with_capacity(4);
+        assert!(vec.capacity() >= 4);
+        info!("capacity {}", vec.capacity());
+    }
+
+    #[test]
+    fn push() {
+        init();
+        let mut vec = Vec::with_capacity(4);
+        vec.push(1);
+        vec.push(2);
+        vec.push(3);
+        assert_eq!(vec.as_slice(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn push_pop() {
+        init();
+        let mut vec = Vec::with_capacity(4);
+        vec.push(1);
+        vec.push(2);
+        vec.push(3);
+        assert!(!vec.is_empty());
+        assert_eq!(vec.pop(), Some(3));
+        assert_eq!(vec.pop(), Some(2));
+        assert_eq!(vec.as_slice(), [1]);
+
+        vec.pop();
+        assert!(vec.is_empty());
+    }
+
+    #[test]
+    fn reserve() {
+        init();
+        let mut vec = Vec::<usize>::new();
+        vec.reserve(4);
+        assert!(vec.capacity() >= 4);
+    }
+
+    #[test]
+    fn reserve_too_small() {
+        init();
+        let mut vec = Vec::<u8>::new();
+        vec.reserve(1);
+        assert!(vec.capacity() > 1);
+    }
+
+    #[test]
+    fn extend_from_slice() {
+        init();
+        let mut vec = Vec::new();
+        let slice = [1, 2, 3];
+        vec.extend_from_slice(&slice);
+        assert_eq!(vec.as_slice(), slice);
+    }
+
+    #[test]
+    fn insert() {
+        init();
+        let mut vec = Vec::new();
+        vec.extend_from_slice(&[1, 3, 4]);
+        vec.insert(1, 2);
+        assert_eq!(vec.as_slice(), [1, 2, 3, 4]);
+        assert_eq!(vec.len(), 4);
+
+        vec.insert(4, 5);
+        assert_eq!(vec.as_slice(), [1, 2, 3, 4, 5]);
+        assert_eq!(vec.len(), 5);
+    }
+
+    #[test]
+    fn delete() {
+        init();
+        let mut vec = Vec::new();
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+
+        vec.remove(2);
+        assert_eq!(vec.as_slice(), [1, 2, 4]);
+        vec.remove(0);
+        assert_eq!(vec.as_slice(), [2, 4]);
+        vec.remove(1);
+        assert_eq!(vec.as_slice(), [2]);
+        vec.remove(0);
+        assert!(vec.is_empty());
+    }
+
+    #[test]
+    fn clear() {
+        init();
+        let mut vec = Vec::new();
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+
+        vec.clear();
+        assert!(vec.is_empty());
+    }
+
+    #[test]
+    fn resize_more() {
+        init();
+        let mut vec = Vec::new();
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+
+        vec.resize(6, 2);
+        assert_eq!(vec.as_slice(), [1, 2, 3, 4, 2, 2]);
+    }
+
+    #[test]
+    fn resize_less() {
+        init();
+        let mut vec = Vec::new();
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+
+        vec.resize(2, 0);
+        assert_eq!(vec.as_slice(), [1, 2]);
+    }
+
+    #[test]
+    fn retain() {
+        init();
+        let mut vec = Vec::new();
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+
+        vec.retain(|&x| x % 2 == 0);
+        assert_eq!(vec.as_slice(), [2, 4]);
+    }
+
+    #[test]
+    fn shrink_to_fit() {
+        init();
+        let mut vec = Vec::with_capacity(128);
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+        vec.shrink_to_fit();
+        assert_eq!(vec.as_slice(), [1, 2, 3, 4]);
+        assert_eq!(vec.capacity(), 4);
+    }
+
+    #[test]
+    fn shrink_to() {
+        init();
+        let mut vec = Vec::with_capacity(128);
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+        vec.shrink_to(8);
+        assert_eq!(vec.as_slice(), [1, 2, 3, 4]);
+        assert_eq!(vec.capacity(), 8);
+    }
+
+    #[test]
+    fn shrink_to_too_small() {
+        init();
+        let mut vec = Vec::with_capacity(128);
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+        vec.shrink_to(1);
+        assert_eq!(vec.as_slice(), [1, 2, 3, 4]);
+        assert_eq!(vec.capacity(), 4);
+    }
+
+    #[test]
+    fn swap_remove() {
+        init();
+        let mut vec = Vec::new();
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+        let two = vec.swap_remove(1);
+        assert_eq!(two, 2);
+        assert_eq!(vec.as_slice(), [1, 4, 3]);
+    }
+
+    #[test]
+    fn truncate() {
+        init();
+        let mut vec = Vec::new();
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+        vec.truncate(2);
+        assert_eq!(vec.as_slice(), [1, 2]);
+    }
+
+    #[test]
+    fn spare_capacity() {
+        init();
+        let mut vec = Vec::with_capacity(4);
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+        vec.truncate(2);
+
+        let slice = vec.spare_capacity();
+        assert_eq!(slice.len(), 2);
+        unsafe {
+             assert_eq!(slice[0].assume_init(), 3);
+             assert_eq!(slice[1].assume_init(), 4);
+        }
+
+        let slice = vec.spare_capacity_mut();
+        assert_eq!(slice.len(), 2);
+        unsafe {
+             assert_eq!(slice[0].assume_init(), 3);
+             assert_eq!(slice[1].assume_init(), 4);
+        }
+    }
+
+    #[test]
+    fn append() {
+        init();
+        let mut this = Vec::with_capacity(4);
+        this.extend_from_slice(&[1, 2, 3, 4]);
+        let mut other = Vec::with_capacity(4);
+        other.extend_from_slice(&[5, 6, 7, 8]);
+
+        this.append(&mut other);
+        assert_eq!(this.as_slice(), [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert!(other.is_empty());
+    }
+
+    #[test]
+    fn dedup() {
+        init();
+        let mut vec = Vec::new();
+        vec.extend_from_slice(&[1, 2, 2, 2, 3, 3, 4]);
+        vec.dedup();
+        assert_eq!(vec.as_slice(), [1, 2, 3, 4]);
     }
 }
