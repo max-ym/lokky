@@ -8,4 +8,9 @@ edition = "2021"
 [features]
 no_std = []
 
+[dev-dependencies]
+jemallocator = "0.3"
+log = "0.4"
+simplelog = "0.11"
+
 [dependencies]
