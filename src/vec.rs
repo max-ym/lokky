@@ -3,7 +3,7 @@ use core::{
     cmp,
     hash::{Hash, Hasher},
     iter::FusedIterator,
-    mem::{self, size_of, MaybeUninit, ManuallyDrop},
+    mem::{self, size_of, ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut, Index, IndexMut, RangeBounds},
     ptr::{self, copy_nonoverlapping, drop_in_place},
     slice::{self, SliceIndex},
@@ -28,7 +28,7 @@ impl<T: 'static> Vec<T> {
     //   to round up a request of less than 8 bytes to at least 8 bytes.
     // - 4 if elements are moderate-sized (<= 1 KiB).
     // - 1 otherwise, to avoid wasting too much space for very short Vecs.
-    const MIN_NON_ZERO_CAP: usize = if core::mem::size_of::<T>() == 1 {
+    pub(crate) const MIN_NON_ZERO_CAP: usize = if core::mem::size_of::<T>() == 1 {
         8
     } else if core::mem::size_of::<T>() <= 1024 {
         4
@@ -79,11 +79,20 @@ impl<T: 'static> Vec<T> {
         if capacity == 0 || size_of::<T>() == 0 {
             Ok(Vec::with_marker(marker))
         } else {
-            trace!("try alloc for type size {} with capacity {}", size_of::<T>(), capacity);
+            trace!(
+                "try alloc for type size {} with capacity {}",
+                size_of::<T>(),
+                capacity
+            );
             let selector = AllocSelector::with_marker::<T>(marker);
             let ptr = ManuallyDrop::new(ScopeAccess::alloc_array_uninit(capacity, selector)?);
             Ok(Vec { ptr, len: 0 })
         }
+    }
+
+    #[inline]
+    pub fn marker(&self) -> AllocMarker {
+        self.ptr.marker()
     }
 
     #[inline]
@@ -154,7 +163,7 @@ impl<T: 'static> Vec<T> {
     #[inline]
     pub fn spare_capacity(&self) -> &[MaybeUninit<T>] {
         unsafe {
-            let slice_ptr = self.ptr.access().as_ptr();
+            let slice_ptr = self.as_ptr();
             let after_slice_ptr = slice_ptr.add(self.len()) as _;
             slice::from_raw_parts(after_slice_ptr, self.spare_len())
         }
@@ -163,7 +172,7 @@ impl<T: 'static> Vec<T> {
     #[inline]
     pub fn spare_capacity_mut(&mut self) -> &mut [MaybeUninit<T>] {
         unsafe {
-            let slice_ptr = self.ptr.access_mut().as_mut_ptr();
+            let slice_ptr = self.as_mut_ptr();
             let after_slice_ptr = slice_ptr.add(self.len()) as _;
             slice::from_raw_parts_mut(after_slice_ptr, self.spare_len())
         }
@@ -175,21 +184,6 @@ impl<T: 'static> Vec<T> {
     }
 
     #[inline]
-    pub fn reserve(&mut self, additional: usize) {
-        self.try_reserve(additional).unwrap();
-    }
-
-    #[inline]
-    pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
-        let required_cap = self.len.overflow_guarded_add(additional);
-        if self.capacity() < required_cap {
-            self.grow_amortized(required_cap).map_err(|e| e.into())
-        } else {
-            Ok(())
-        }
-    }
-
-    #[inline]
     pub fn reserve_exact(&mut self, additional: usize) {
         self.try_reserve_exact(additional).unwrap();
     }
@@ -198,7 +192,7 @@ impl<T: 'static> Vec<T> {
     pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), TryReserveError> {
         let required_cap = self.len.overflow_guarded_add(additional);
         if self.capacity() < required_cap {
-            self.grow_exact(required_cap).map_err(|e| e.into())
+            self.grow_amortized(required_cap).map_err(|e| e.into())
         } else {
             Ok(())
         }
@@ -271,7 +265,7 @@ impl<T: 'static> Vec<T> {
 
     #[inline]
     pub fn push(&mut self, element: T) {
-        self.reserve(1);
+        self.reserve_exact(1);
         let slice_ptr = self.as_mut_ptr();
         // SAFETY: offset address is assured to be correct by reserve function.
         // Reserve would otherwise fail if it was not possible to locate the value in that address
@@ -307,9 +301,15 @@ impl<T: 'static> Vec<T> {
         unsafe { impose_lifetime_mut(&mut self) }
     }
 
+    /// Deallocate Vec without running Drop for the elements.
+    #[inline]
+    pub fn dealloc_without_drop(mut self) {
+        unsafe { self.ptr.dealloc() };
+    }
+
     #[inline]
     pub fn append(&mut self, other: &mut Self) {
-        self.reserve(other.len());
+        self.reserve_exact(other.len());
         // SAFETY: ptr is within valid reserved range.
         let self_end_ptr = unsafe { self.as_mut_ptr().add(self.len()) as *mut T };
         let other_ptr = other.as_ptr();
@@ -327,7 +327,7 @@ impl<T: 'static> Vec<T> {
     where
         T: Clone,
     {
-        self.reserve(slice.len());
+        self.reserve_exact(slice.len());
         for i in slice {
             self.push(i.clone());
         }
@@ -335,7 +335,7 @@ impl<T: 'static> Vec<T> {
 
     pub fn extend_from_iter(&mut self, iter: impl IntoIterator<Item = T>) {
         let iter = iter.into_iter();
-        self.reserve(iter.size_hint().0);
+        self.reserve_exact(iter.size_hint().0);
 
         for item in iter {
             self.push(item);
@@ -404,7 +404,7 @@ impl<T: 'static> Vec<T> {
         assert!(index <= self.len());
 
         if self.is_full() {
-            self.reserve(1);
+            self.reserve_exact(1);
         }
 
         unsafe {
@@ -467,104 +467,49 @@ impl<T: 'static> Vec<T> {
     where
         T: Clone,
     {
-        self.do_resize(len, ResizeWithVal(val))
+        ResizeWithVal(val).do_resize(self, len)
     }
 
     pub fn resize_with(&mut self, len: usize, f: impl FnMut() -> T) {
-        self.do_resize(len, ResizeWithFn(f))
+        ResizeWithFn(f).do_resize(self, len)
     }
 
-    #[inline]
-    fn do_resize(&mut self, len: usize, mut val: impl ResizeWith<T>) {
-        if self.len() >= len {
-            self.truncate(len);
-        } else {
-            let additional = len - self.len();
-            self.reserve(additional);
-
-            // Add all elements except last.
-            for _ in 0..(additional - 1) {
-                self.push(val.next());
-            }
-            // Add last element. For `resize` it will add last value without unnecessary
-            // clonning it. For `resize_with` it will just call the Fn again.
-            self.push(val.last());
-        }
+    pub fn retain(&mut self, retain: impl FnMut(&T) -> bool) {
+        RetainIter::retain(self, retain)
     }
 
-    pub fn retain(&mut self, mut retain: impl FnMut(&T) -> bool) {
-        let discard_first = if let Some(first) = self.get(0) {
-            !retain(first)
-        } else {
-            // Return on empty array.
-            return;
-        };
-
-        let mut iter = RetainIter::new(self, discard_first);
-        while iter.has_next() {
-            if retain(iter.peek()) {
-                iter.keep_next();
-            } else {
-                iter.discard_next();
-            }
-        }
-    }
-
-    pub fn dedup(&mut self) 
+    pub fn dedup(&mut self)
     where
         T: PartialEq,
     {
         self.dedup_by(|a, b| PartialEq::eq(a, b))
     }
 
-    pub fn dedup_by_key<K: PartialEq>(&mut self, mut key: impl FnMut(&mut T) -> K) {
-        let mut prev_key = if let Some(first) = self.get_mut(0) {
-            key(first)
-        } else {
-            // Return on empty array.
-            return;
-        };
-
-        let mut iter = RetainIter::new(self, false);
-        while iter.has_next() {
-            let cur_key = key(iter.peek_mut());
-            if prev_key == cur_key {
-                iter.discard_next();
-            } else {
-                iter.keep_next();
-                prev_key = cur_key;
-            }
-        }
+    pub fn dedup_by_key<K: PartialEq>(&mut self, key: impl FnMut(&mut T) -> K) {
+        RetainIter::dedup_by_key(self, key)
     }
 
-    pub fn dedup_by(&mut self, mut same_bucket: impl FnMut(&mut T, &mut T) -> bool) {
-        let mut keeped: *mut T = if let Some(first) = self.get_mut(0) {
-            first
-        } else {
-            // Return on empty array.
-            return;
-        };
-        // Shadow `same_bucket` to accept pointers. We use those to avoid errors of
-        // borrowing `vec` both mutable and immutable at the same time.
-        //
-        // SAFETY: no references/pointers do not access the same data in this context.
-        // Race condition cannot occur.
-        let mut same_bucket =
-            |tested: *mut T, keeped: *mut T| unsafe { same_bucket(&mut *tested, &mut *keeped) };
-
-        let mut iter = RetainIter::new(self, false);
-        while iter.has_next() {
-            let tested: *mut T = iter.peek_mut();
-            if same_bucket(tested, keeped) {
-                iter.discard_next();
-            } else {
-                iter.keep_next();
-                keeped = tested;
-            }
-        }
+    pub fn dedup_by(&mut self, same_bucket: impl FnMut(&mut T, &mut T) -> bool) {
+        RetainIter::dedup_by(self, same_bucket)
     }
 
     pub fn drain(&mut self, range: impl RangeBounds<usize>) -> Drain<T> {
+        Drain(DrainInner::new(self, range))
+    }
+}
+
+pub struct Drain<'vec, T: 'static>(DrainInner<'vec, T, Vec<T>>);
+
+pub(crate) struct DrainInner<'vec, T: 'static, V: Vecx<T>> {
+    slice: &'vec [T],
+    vec_ptr: *mut V,
+    start: usize,
+    end: usize,
+    original_len: usize,
+}
+
+impl<'vec, T: 'static, V: Vecx<T>> DrainInner<'vec, T, V> {
+    pub(crate) fn new(vec: &'vec mut V, range: impl RangeBounds<usize>) -> Self {
         use core::ops::Bound::*;
         let start = match range.start_bound() {
             Unbounded => 0,
@@ -572,7 +517,7 @@ impl<T: 'static> Vec<T> {
             Excluded(&v) => v + 1,
         };
         let end = match range.end_bound() {
-            Unbounded => self.len(),
+            Unbounded => vec.len(),
             Included(&v) => v + 1,
             Excluded(&v) => v,
         };
@@ -580,33 +525,23 @@ impl<T: 'static> Vec<T> {
         // In case Drop panics or Drain gets leaked
         // this will leave only valid values in the Vec though those elements
         // located after the slice will be leaked.
-        unsafe { self.set_len(start) };
+        unsafe { vec.set_len(start) };
 
-        Drain {
-            vec_ptr: self,
+        DrainInner {
+            vec_ptr: vec,
             start,
             end,
-            slice: &self.as_slice()[start..end],
-            original_len: self.len(),
+            slice: &vec.as_slice()[start..end],
+            original_len: vec.len(),
         }
     }
-}
 
-pub struct Drain<'vec, T: 'static> {
-    slice: &'vec [T],
-    vec_ptr: *mut Vec<T>,
-    start: usize,
-    end: usize,
-    original_len: usize,
-}
-
-impl<'vec, T: 'static> Drain<'vec, T> {
     pub fn as_slice(&self) -> &[T] {
         self.slice
     }
 }
 
-impl<'vec, T: 'static> Drop for Drain<'vec, T> {
+impl<'vec, T: 'static, V: Vecx<T>> Drop for DrainInner<'vec, T, V> {
     fn drop(&mut self) {
         // `count` reads all remaining elements out and drops them.
         self.count();
@@ -628,7 +563,7 @@ impl<'vec, T: 'static> Drop for Drain<'vec, T> {
     }
 }
 
-impl<'vec, T: 'static> Iterator for Drain<'vec, T> {
+impl<'vec, T: 'static, V: Vecx<T>> Iterator for DrainInner<'vec, T, V> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -649,7 +584,7 @@ impl<'vec, T: 'static> Iterator for Drain<'vec, T> {
     }
 }
 
-impl<'vec, T: 'static> DoubleEndedIterator for Drain<'vec, T> {
+impl<'vec, T: 'static, V: Vecx<T>> DoubleEndedIterator for DrainInner<'vec, T, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some(ptr) = self.slice.last().map(|v| v as *const T) {
             unsafe {
@@ -663,17 +598,69 @@ impl<'vec, T: 'static> DoubleEndedIterator for Drain<'vec, T> {
     }
 }
 
-impl<'vec, T: 'static> ExactSizeIterator for Drain<'vec, T> {}
+impl<'vec, T: 'static, V: Vecx<T>> ExactSizeIterator for DrainInner<'vec, T, V> {}
 
-impl<'vec, T: 'static> FusedIterator for Drain<'vec, T> {}
+impl<'vec, T: 'static, V: Vecx<T>> FusedIterator for DrainInner<'vec, T, V> {}
 
-trait ResizeWith<T> {
+#[macro_export(local_inner_macro)]
+macro_rules! impl_drain {
+    ($t:ty, $($gen:tt)*) => {
+        impl<$($gen)*> $t {
+            pub fn as_slice(&self) -> &[T] {
+                self.0.as_slice()
+            }
+        }
+
+        impl<$($gen)*> Iterator for $t {
+            type Item = T;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                self.0.next()
+            }
+
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                self.0.size_hint()
+            }
+        }
+
+        impl<$($gen)*> DoubleEndedIterator for $t {
+            fn next_back(&mut self) -> Option<Self::Item> {
+                self.0.next_back()
+            }
+        }
+
+        impl<$($gen)*> ExactSizeIterator for $t {}
+
+        impl<$($gen)*> FusedIterator for $t {}
+    };
+}
+impl_drain!(Drain<'vec, T>, 'vec, T: 'static);
+
+pub(crate) trait ResizeWith<T: 'static>: Sized {
     fn next(&mut self) -> T;
     fn last(self) -> T;
+
+    #[inline]
+    fn do_resize(mut self, vec: &mut dyn Vecx<T>, len: usize) {
+        if vec.len() >= len {
+            vec.truncate(len);
+        } else {
+            let additional = len - vec.len();
+            vec.reserve_exact(additional);
+
+            // Add all elements except last.
+            for _ in 0..(additional - 1) {
+                vec.push(self.next());
+            }
+            // Add last element. For `resize` it will add last value without unnecessary
+            // clonning it. For `resize_with` it will just call the Fn again.
+            vec.push(self.last());
+        }
+    }
 }
 
-struct ResizeWithFn<T, F: FnMut() -> T>(F);
-impl<T, F: FnMut() -> T> ResizeWith<T> for ResizeWithFn<T, F> {
+pub(crate) struct ResizeWithFn<T, F: FnMut() -> T>(pub(crate) F);
+impl<T: 'static, F: FnMut() -> T> ResizeWith<T> for ResizeWithFn<T, F> {
     fn next(&mut self) -> T {
         self.0()
     }
@@ -683,8 +670,8 @@ impl<T, F: FnMut() -> T> ResizeWith<T> for ResizeWithFn<T, F> {
     }
 }
 
-struct ResizeWithVal<T: Clone>(T);
-impl<T: Clone> ResizeWith<T> for ResizeWithVal<T> {
+pub(crate) struct ResizeWithVal<T: Clone>(pub(crate) T);
+impl<T: Clone + 'static> ResizeWith<T> for ResizeWithVal<T> {
     fn next(&mut self) -> T {
         self.0.clone()
     }
@@ -695,17 +682,17 @@ impl<T: Clone> ResizeWith<T> for ResizeWithVal<T> {
 }
 
 // To facilitate iterating through the Vec in `retain` and `dedup_*` fns:
-struct RetainIter<'a, T: 'static> {
-    vec: &'a mut Vec<T>,
+pub(crate) struct RetainIter<'a, T: 'static> {
+    vec: &'a mut dyn Vecx<T>,
     write: usize,
     read: usize,
     initial_len: usize,
 }
 
 impl<'a, T: 'static> RetainIter<'a, T> {
-    // Create new iterator and instruct whether first element should be discarded
-    // or retained.
-    fn new(vec: &'a mut Vec<T>, discard_first: bool) -> Self {
+    /// Create new iterator and instruct whether first element should be discarded
+    /// or retained.
+    fn new(vec: &'a mut dyn Vecx<T>, discard_first: bool) -> Self {
         // This is ensured by the calling contexts.
         debug_assert!(!vec.is_empty());
 
@@ -744,11 +731,11 @@ impl<'a, T: 'static> RetainIter<'a, T> {
         unsafe { self.vec.get_unchecked_mut(self.read) }
     }
 
-    // Copy current read element from `read` to `write`.
-    //
-    // # Safety
-    // Care should be taken to forget the element in `read` and only use one stored
-    // in `write` after copying.
+    /// Copy current read element from `read` to `write`.
+    ///
+    /// # Safety
+    /// Care should be taken to forget the element in `read` and only use one stored
+    /// in `write` after copying.
     unsafe fn copy(&mut self) {
         debug_assert_ne!(self.read, self.write);
 
@@ -757,16 +744,16 @@ impl<'a, T: 'static> RetainIter<'a, T> {
         ptr::copy_nonoverlapping(read, write, 1);
     }
 
-    // Increment `len` in controlled `vec` to indicate processed element.
-    //
-    // # Safety
-    // Progress `len` when the valid element is in that next position. We better
-    // keep `vec` valid.
+    /// Increment `len` in controlled `vec` to indicate processed element.
+    ///
+    /// # Safety
+    /// Progress `len` when the valid element is in that next position. We better
+    /// keep `vec` valid.
     unsafe fn increment_vec_len(&mut self) {
         self.vec.set_len(self.vec.len() + 1);
     }
 
-    // Retain read element and move to next.
+    /// Retain read element and move to next.
     fn keep_next(&mut self) {
         unsafe { self.copy() };
         unsafe { self.increment_vec_len() };
@@ -774,10 +761,78 @@ impl<'a, T: 'static> RetainIter<'a, T> {
         self.write += 1;
     }
 
-    // Drop read element and move to next.
+    /// Drop read element and move to next.
     fn discard_next(&mut self) {
         unsafe { drop_in_place(self.vec.get_unchecked_mut(self.read)) };
         self.read += 1;
+    }
+
+    #[inline]
+    pub fn dedup_by(vec: &'a mut dyn Vecx<T>, mut same_bucket: impl FnMut(&mut T, &mut T) -> bool) {
+        let mut keeped: *mut T = if let Some(first) = vec.get_mut(0) {
+            first
+        } else {
+            // Return on empty array.
+            return;
+        };
+        // Shadow `same_bucket` to accept pointers. We use those to avoid errors of
+        // borrowing `vec` both mutable and immutable at the same time.
+        //
+        // SAFETY: no references/pointers do not access the same data in this context.
+        // Race condition cannot occur.
+        let mut same_bucket =
+            |tested: *mut T, keeped: *mut T| unsafe { same_bucket(&mut *tested, &mut *keeped) };
+
+        let mut iter = RetainIter::new(vec, false);
+        while iter.has_next() {
+            let tested: *mut T = iter.peek_mut();
+            if same_bucket(tested, keeped) {
+                iter.discard_next();
+            } else {
+                iter.keep_next();
+                keeped = tested;
+            }
+        }
+    }
+
+    #[inline]
+    pub fn dedup_by_key<K: PartialEq>(vec: &mut dyn Vecx<T>, mut key: impl FnMut(&mut T) -> K) {
+        let mut prev_key = if let Some(first) = vec.get_mut(0) {
+            key(first)
+        } else {
+            // Return on empty array.
+            return;
+        };
+
+        let mut iter = RetainIter::new(vec, false);
+        while iter.has_next() {
+            let cur_key = key(iter.peek_mut());
+            if prev_key == cur_key {
+                iter.discard_next();
+            } else {
+                iter.keep_next();
+                prev_key = cur_key;
+            }
+        }
+    }
+
+    #[inline]
+    pub fn retain(vec: &mut dyn Vecx<T>, mut retain: impl FnMut(&T) -> bool) {
+        let discard_first = if let Some(first) = vec.get(0) {
+            !retain(first)
+        } else {
+            // Return on empty array.
+            return;
+        };
+
+        let mut iter = RetainIter::new(vec, discard_first);
+        while iter.has_next() {
+            if retain(iter.peek()) {
+                iter.keep_next();
+            } else {
+                iter.discard_next();
+            }
+        }
     }
 }
 
@@ -920,7 +975,7 @@ impl<T, const N: usize> From<[T; N]> for Vec<T> {
 
         unsafe {
             // Resize Vec to be able to hold new copied elements.
-            vec.reserve(N);
+            vec.reserve_exact(N);
             // Copy all data from slice to Vec.
             ptr::copy_nonoverlapping(slice_ptr, vec_ptr, N);
             // Set correct amount of elements.
@@ -937,7 +992,10 @@ impl<T, const N: usize> From<[T; N]> for Vec<T> {
 impl<T> From<Box<[T]>> for Vec<T> {
     fn from(boxed: Box<[T]>) -> Self {
         let len = boxed.0.access().len();
-        Vec { ptr: ManuallyDrop::new(boxed.0), len }
+        Vec {
+            ptr: ManuallyDrop::new(boxed.0),
+            len,
+        }
     }
 }
 
@@ -1043,7 +1101,48 @@ impl<T> AsRef<[T]> for IntoIter<T> {
     }
 }
 
-trait OverflowGuardedAdd {
+impl<T: 'static> Vecx<T> for Vec<T> {
+    #[inline(always)]
+    unsafe fn set_len(&mut self, len: usize) {
+        self.set_len(len)
+    }
+
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    #[inline(always)]
+    fn as_slice(&self) -> &[T] {
+        self.as_slice()
+    }
+
+    #[inline(always)]
+    fn truncate(&mut self, len: usize) {
+        self.truncate(len)
+    }
+
+    #[inline(always)]
+    fn push(&mut self, val: T) {
+        self.push(val)
+    }
+
+    #[inline(always)]
+    fn reserve_exact(&mut self, additional: usize) {
+        self.reserve_exact(additional)
+    }
+}
+
+pub(crate) trait Vecx<T: 'static>: Deref<Target = [T]> + DerefMut {
+    unsafe fn set_len(&mut self, len: usize);
+    fn len(&self) -> usize;
+    fn as_slice(&self) -> &[T];
+    fn truncate(&mut self, len: usize);
+    fn push(&mut self, val: T);
+    fn reserve_exact(&mut self, additional: usize);
+}
+
+pub(crate) trait OverflowGuardedAdd {
     /// Guard the value from overflowing. Use when calculating array capacity or length
     /// to be safe from overflowing. If overflow occurs the add will panic.
     fn overflow_guarded_add(&self, rhs: Self) -> Self;
@@ -1080,12 +1179,12 @@ mod test {
     }
 
     fn init() {
-        use simplelog::{TermLogger, Config, TerminalMode, ColorChoice};
+        use simplelog::{ColorChoice, Config, TermLogger, TerminalMode};
         let _ = TermLogger::init(
             LevelFilter::Trace,
             Config::default(),
             TerminalMode::Stdout,
-             ColorChoice::Auto,
+            ColorChoice::Auto,
         );
         unsafe {
             SCOPE = MaybeUninit::new(DummyScope(Jemalloc));
@@ -1138,7 +1237,7 @@ mod test {
     fn reserve() {
         init();
         let mut vec = Vec::<usize>::new();
-        vec.reserve(4);
+        vec.reserve_exact(4);
         assert!(vec.capacity() >= 4);
     }
 
@@ -1146,7 +1245,7 @@ mod test {
     fn reserve_too_small() {
         init();
         let mut vec = Vec::<u8>::new();
-        vec.reserve(1);
+        vec.reserve_exact(1);
         assert!(vec.capacity() > 1);
     }
 
@@ -1288,15 +1387,15 @@ mod test {
         let slice = vec.spare_capacity();
         assert_eq!(slice.len(), 2);
         unsafe {
-             assert_eq!(slice[0].assume_init(), 3);
-             assert_eq!(slice[1].assume_init(), 4);
+            assert_eq!(slice[0].assume_init(), 3);
+            assert_eq!(slice[1].assume_init(), 4);
         }
 
         let slice = vec.spare_capacity_mut();
         assert_eq!(slice.len(), 2);
         unsafe {
-             assert_eq!(slice[0].assume_init(), 3);
-             assert_eq!(slice[1].assume_init(), 4);
+            assert_eq!(slice[0].assume_init(), 3);
+            assert_eq!(slice[1].assume_init(), 4);
         }
     }
 

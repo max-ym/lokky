@@ -16,4 +16,6 @@ pub mod rc;
 
 pub mod vec;
 
+pub mod small_vec;
+
 mod marker;
