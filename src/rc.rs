@@ -97,7 +97,7 @@ impl<T: ?Sized> Rc<T> {
     }
 
     /// Mutable reference for the value.
-    /// 
+    ///
     /// # Safety
     /// This function does not check whether `RcBox` still holds the value or whether it is
     /// deallocated. So it is possible to get a reference to invalid data.
@@ -113,10 +113,9 @@ impl<T: 'static> Rc<T> {
             weak: Cell::new(0),
             val: val.into(),
         };
-        Rc(ManuallyDrop::new(ScopeAccess::alloc(
-            b,
-            AllocSelector::new::<T>(),
-        ).unwrap()))
+        Rc(ManuallyDrop::new(
+            ScopeAccess::alloc(b, AllocSelector::new::<T>()).unwrap(),
+        ))
     }
 
     pub fn try_unwrap(this: Rc<T>) -> Result<T, Self> {
@@ -167,7 +166,7 @@ impl<T: ?Sized> Drop for Rc<T> {
         } else {
             self.inner().dec_strong();
         }
-        
+
         if Rc::strong_count(self) == 0 && Rc::weak_count(self) == 0 {
             // Nothing refers to RcBox now so drop it.
             unsafe { drop_in_place(&mut self.0) }

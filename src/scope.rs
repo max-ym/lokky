@@ -112,7 +112,7 @@ impl Env {
     where
         S: Scope,
     {
-        use crate::marker::{UnsafeFrom};
+        use crate::marker::UnsafeFrom;
         unsafe {
             // SAFETY: we definitely know the lifetime will be valid during scope execution.
             let prev: &mut dyn Scope = impose_lifetime_mut(self.cur.as_mut());

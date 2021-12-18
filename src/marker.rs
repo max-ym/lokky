@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-use core::mem::{ManuallyDrop};
 use crate::ScopeAccess;
+use core::mem::ManuallyDrop;
 
 /// Marker to indicate value that should be alive for current scope in which it is used.
 /// It wraps a reference to the scope's object. It is unsafe to create this wrapper as
@@ -41,7 +41,9 @@ pub trait UnsafeInto<T> {
 }
 
 impl<T, U> UnsafeInto<U> for T
-where U: UnsafeFrom<T> {
+where
+    U: UnsafeFrom<T>,
+{
     unsafe fn unsafe_into(self) -> U {
         U::unsafe_from(self)
     }
@@ -164,7 +166,8 @@ impl<T> MaybeDropped<T> {
     }
 }
 
-pub(crate) fn clone_scope_access<T: ?Sized>(access: &ManuallyDrop<ScopeAccess<T>>)
-    -> ManuallyDrop<ScopeAccess<T>> {
+pub(crate) fn clone_scope_access<T: ?Sized>(
+    access: &ManuallyDrop<ScopeAccess<T>>,
+) -> ManuallyDrop<ScopeAccess<T>> {
     unsafe { ManuallyDrop::new((*access).clone()) }
 }

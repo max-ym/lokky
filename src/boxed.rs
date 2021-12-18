@@ -12,10 +12,7 @@ impl<T: 'static> Box<T> {
     }
 
     pub fn new_with(x: T, marker: AllocMarker) -> Self {
-        Box(ScopeAccess::alloc(
-            x,
-            AllocSelector::with_marker::<T>(marker),
-        ).unwrap())
+        Box(ScopeAccess::alloc(x, AllocSelector::with_marker::<T>(marker)).unwrap())
     }
 
     pub fn into_inner(self) -> T {

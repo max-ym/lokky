@@ -3,7 +3,7 @@ use crate::scope::{AllocMarker, AllocSelector};
 use crate::trace;
 use core::alloc::{GlobalAlloc, Layout};
 use core::marker::PhantomData;
-use core::mem::{self, transmute, size_of};
+use core::mem::{self, size_of, transmute};
 use core::ptr::NonNull;
 use core::{ptr, slice};
 
@@ -125,7 +125,7 @@ impl<T: ?Sized> ScopeAccess<T> {
         access
     }
 
-    /// Change the access to the value to access to the array of values. 
+    /// Change the access to the value to access to the array of values.
     ///
     /// # Safety
     /// The length of the slice should not be larger than the actual slice length so that
@@ -137,7 +137,7 @@ impl<T: ?Sized> ScopeAccess<T> {
         RefAccess(slice::from_raw_parts(self.ptr.as_ptr(), len))
     }
 
-    /// Change the access to the value to access to the array of values. 
+    /// Change the access to the value to access to the array of values.
     ///
     /// # Safety
     /// The length of the slice should not be larger than the actual slice length so that
@@ -186,7 +186,7 @@ pub struct AllocError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArrayAllocError {
     CapacityOverflow,
-    AllocError(AllocError)
+    AllocError(AllocError),
 }
 
 impl<T> ScopeAccess<T> {
@@ -210,8 +210,8 @@ impl<T> ScopeAccess<T> {
         } else {
             Err(AllocError)
         }
-    }    
-    
+    }
+
     /// Read out the accessed value and deallocate the memory.
     pub fn into_inner(mut self) -> T {
         unsafe {
@@ -239,24 +239,28 @@ impl<T> ScopeAccess<T> {
 
 impl<T: ?Sized> ScopeAccess<T> {
     /// Deallocate memory.
-    /// 
+    ///
     /// # Safety
     /// Memory should not be accessed and Drop execution should be prevented.
     pub unsafe fn dealloc(&mut self) {
         trace!("dealloc ScopeAccess {:#?}", self.ptr.as_ptr());
-        self.alloc.dealloc(self.ptr.as_ptr() as _, Layout::for_value(self.ptr.as_ref()));
+        self.alloc
+            .dealloc(self.ptr.as_ptr() as _, Layout::for_value(self.ptr.as_ref()));
     }
 }
 
 impl<T> ScopeAccess<[T]> {
     /// Allocate uninitialized array. Given query will be used
     /// to select appropriate allocator.
-    pub fn alloc_array_uninit(capacity: usize, selector: AllocSelector) -> Result<Self, ArrayAllocError> {
+    pub fn alloc_array_uninit(
+        capacity: usize,
+        selector: AllocSelector,
+    ) -> Result<Self, ArrayAllocError> {
         use ArrayAllocError::*;
         ScopeAccess::<T>::alloc_layout(
-            Layout::array::<T>(capacity)
-            .map_err(|_| CapacityOverflow)?, 
-            selector)
+            Layout::array::<T>(capacity).map_err(|_| CapacityOverflow)?,
+            selector,
+        )
         .map_err(AllocError)
         .map(|v| unsafe { v.cast_to_slice(capacity) })
     }
@@ -279,9 +283,7 @@ impl<T> ScopeAccess<[T]> {
         if ptr.is_null() {
             Err(AllocError(super::AllocError))
         } else {
-            self.ptr = NonNull::new_unchecked(
-                slice::from_raw_parts_mut(ptr as _, new_capacity)
-            );
+            self.ptr = NonNull::new_unchecked(slice::from_raw_parts_mut(ptr as _, new_capacity));
             Ok(())
         }
     }
