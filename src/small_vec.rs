@@ -584,6 +584,23 @@ impl<T: 'static, const N: usize> SmallVec<T, N> {
             self.push(elem.clone());
         }
     }
+
+    #[inline]
+    pub fn split_off(&mut self, at: usize) -> Self {
+        self.split_off_into(at)
+    }
+
+    pub fn split_off_into<const LEN: usize>(&mut self, at: usize) -> SmallVec<T, LEN> {
+        let slice = &mut self[at] as *mut T;
+        let count = self.len() - at;
+        let mut into = SmallVec::with_capacity(count);
+        unsafe {
+            copy_nonoverlapping(slice, into.as_mut_ptr(), count);
+            self.set_len(self.len() - count);
+            into.set_len(count);
+        }
+        into
+    }
 }
 
 pub struct Drain<'vec, T: 'static, const N: usize>(DrainInner<'vec, T, SmallVec<T, N>>);
