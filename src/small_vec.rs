@@ -4,9 +4,9 @@ use core::hash::Hash;
 use core::iter::FusedIterator;
 use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut, Index, IndexMut, RangeBounds};
-use core::ptr::copy_nonoverlapping;
+use core::ptr::{copy, copy_nonoverlapping};
 use core::ptr::{self, drop_in_place};
-use core::slice::{self};
+use core::slice;
 
 use crate::boxed::Box;
 use crate::scope::AllocMarker;
@@ -16,6 +16,8 @@ use crate::vec::{
 };
 use crate::{impl_drain, ArrayAllocError};
 
+/// The same as `Vec` but also allows storing small slices in the stack without allocating
+/// space on heap.
 pub struct SmallVec<T: 'static, const N: usize> {
     storage: Storage<T, N>,
     marker: AllocMarker,
@@ -31,6 +33,8 @@ struct StackVec<T: 'static, const N: usize> {
     len: usize,
 }
 
+// Allows to redirect call to either stack or heap based function depending on 
+// current storage type.
 macro_rules! redirect_fn {
     ($v:vis fn $f:ident (&self $(,$var:ident : $var_ty:ty)*) $(-> $t:ty)?) => {
         #[inline]
@@ -94,6 +98,7 @@ impl<T: 'static, const N: usize> StackVec<T, N> {
 
     #[inline]
     pub fn capacity(&self) -> usize {
+        // Stack-based version has const size.
         N
     }
 
@@ -126,7 +131,6 @@ impl<T: 'static, const N: usize> StackVec<T, N> {
         unsafe { slice::from_raw_parts_mut(ptr, self.len()) }
     }
 
-    #[inline]
     pub fn clear(&mut self) {
         let ptr = self.slice.as_mut_ptr() as *mut T;
         let slice = unsafe { slice::from_raw_parts_mut(ptr, self.len()) };
@@ -165,24 +169,6 @@ impl<T: 'static, const N: usize> StackVec<T, N> {
         }
     }
 
-    pub unsafe fn unchecked_extend_from_slice(&mut self, slice: &[T])
-    where
-        T: Clone,
-    {
-        debug_assert!(self.len() + slice.len() <= self.capacity());
-
-        for element in slice {
-            let value = element.clone();
-            self.unchecked_push(value);
-        }
-    }
-
-    pub unsafe fn unchecked_extend_from_iter(&mut self, iter: impl Iterator<Item = T>) {
-        for value in iter {
-            self.unchecked_push(value);
-        }
-    }
-
     pub unsafe fn unchecked_insert(&mut self, index: usize, value: T) {
         debug_assert!(self.len() >= index);
 
@@ -195,6 +181,7 @@ impl<T: 'static, const N: usize> StackVec<T, N> {
         self.set_len(self.len() + 1);
     }
 
+    #[inline]
     pub fn remove(&mut self, index: usize) -> T {
         assert!(index < self.len());
         unsafe { self.unchecked_remove(index) }
@@ -203,15 +190,21 @@ impl<T: 'static, const N: usize> StackVec<T, N> {
     pub unsafe fn unchecked_remove(&mut self, index: usize) -> T {
         debug_assert!(index < self.len());
 
+        // Read out value at `index`.
         let read: *mut T = self.get_unchecked_mut(index);
         let value = ptr::read(read);
+
+        // Move elements to fill read-out gap.
+        let count = self.len() - index;
+        copy(self.as_ptr().add(index + 1), self.as_mut_ptr().add(index), count);
+
         self.set_len(self.len() - 1);
 
         value
     }
 
     fn shrink_to_fit(&mut self) {
-        // Nothing.
+        // Nothing. Stack-based version has fixed capacity.
     }
 
     fn shrink_to(&mut self, _min_capacity: usize) {
@@ -223,10 +216,11 @@ impl<T: 'static, const N: usize> StackVec<T, N> {
         self.capacity() - self.len()
     }
 
-    #[inline]
     pub fn truncate(&mut self, len: usize) {
         if self.len() > len {
             let old_len = self.len();
+            // Reduce len in case Drop panics so that dropped data does not
+            // get potentially accessed.
             unsafe { self.set_len(len) };
             for to_drop in old_len..len {
                 unsafe {
@@ -237,16 +231,19 @@ impl<T: 'static, const N: usize> StackVec<T, N> {
         }
     }
 
-    #[inline]
     pub fn swap_remove(&mut self, index: usize) -> T {
         assert!(self.len() > index);
 
         unsafe {
+            // Read-out value by index.
             let remove: *mut T = self.get_unchecked_mut(index);
             let value = ptr::read(remove);
+
+            // Copy last element in place of removed one.
             let last = self.get_unchecked(self.len() - 1);
             ptr::copy_nonoverlapping(last, remove, 1);
 
+            // We have removed the element so reduce len.
             self.set_len(self.len() - 1);
             value
         }
@@ -339,6 +336,7 @@ impl<T: 'static, const N: usize> SmallVec<T, N> {
         pub fn as_mut_slice(&mut self) -> &mut [T];
         pub fn shrink_to_fit(&mut self);
         pub fn shrink_to(&mut self, min_capacity: usize);
+        pub fn pop(&mut self) -> Option<T>;
         pub fn remove(&mut self, index: usize) -> T;
         pub fn as_ptr(&self) -> *const T;
         pub fn as_mut_ptr(&mut self) -> *mut T;
@@ -376,6 +374,11 @@ impl<T: 'static, const N: usize> SmallVec<T, N> {
     where
         T: Clone,
     {
+        if len > N {
+            // Move to heap to be able to store all new elements.
+            self.reserve(len - N);
+        }
+
         use Storage::*;
         match &mut self.storage {
             Stack(vec) => vec.resize(len, val),
@@ -410,8 +413,9 @@ impl<T: 'static, const N: usize> SmallVec<T, N> {
         match &mut self.storage {
             Stack(vec) => {
                 let old_vec = vec;
+                let reserve = usize::max(old_vec.len() + additional, Vec::<T>::MIN_NON_ZERO_CAP);
                 let mut new_vec =
-                    Vec::try_with_capacity_and_marker(old_vec.len() + additional, self.marker)?;
+                    Vec::try_with_capacity_and_marker(reserve, self.marker)?;
 
                 unsafe {
                     let read = old_vec.as_slice();
@@ -479,7 +483,7 @@ impl<T: 'static, const N: usize> SmallVec<T, N> {
                 stack_vec.set_len(self.len());
             }
 
-            // Dealloc heap Vec without dropping values as those are moved to stack now.
+            // Dealloc heap Vec without dropping the values as those are moved to the stack now.
             let mut storage = Storage::Stack(stack_vec);
             core::mem::swap(&mut storage, &mut self.storage);
             if let Storage::Heap(vec) = storage {
@@ -523,7 +527,9 @@ impl<T: 'static, const N: usize> SmallVec<T, N> {
         let self_end_ptr = unsafe { self.as_mut_ptr().add(self.len()) as *mut T };
         let other_ptr = other.as_ptr();
         unsafe {
+            // SAFETY: we reserved enough space to copy all the elements.
             copy_nonoverlapping(other_ptr, self_end_ptr, other.len());
+
             self.set_len(self.len() + other.len());
             other.set_len(0);
         }
@@ -943,5 +949,250 @@ impl<T: 'static, const N: usize> FromIterator<T> for SmallVec<T, N> {
         let mut vec = SmallVec::new();
         vec.extend(iter);
         vec
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::test::init;
+
+    #[test]
+    fn create_vec() {
+        init();
+        SmallVec::<usize, 10>::new();
+    }
+
+    #[test]
+    fn alloc_vec() {
+        init();
+        let vec = SmallVec::<usize, 10>::with_capacity(11);
+        assert!(vec.capacity() >= 11);
+    }
+    
+    #[test]
+    fn push() {
+        init();
+        let mut vec = SmallVec::<usize, 3>::new();
+        vec.push(1);
+        vec.push(2);
+        vec.push(3);
+        assert_eq!(vec.as_slice(), [1, 2, 3]);
+    }
+    
+    #[test]
+    fn push_heap() {
+        init();
+        let mut vec = SmallVec::<usize, 1>::new();
+        vec.push(1);
+        vec.push(2);
+        vec.push(3);
+        assert_eq!(vec.as_slice(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn push_pop() {
+        init();
+        let mut vec = SmallVec::<usize, 1>::new();
+        vec.push(1);
+        vec.push(2);
+        vec.push(3);
+        assert!(!vec.is_empty());
+        assert_eq!(vec.pop(), Some(3));
+        assert_eq!(vec.pop(), Some(2));
+        assert_eq!(vec.as_slice(), [1]);
+
+        vec.pop();
+        assert!(vec.is_empty());
+    }
+    
+    #[test]
+    fn reserve() {
+        init();
+        let mut vec = SmallVec::<usize, 1>::new();
+        vec.reserve_exact(4);
+        assert!(vec.capacity() >= 4);
+    }
+
+    #[test]
+    fn reserve_too_small() {
+        init();
+        let mut vec = SmallVec::<u8, 0>::new();
+        vec.reserve_exact(1);
+        assert!(vec.capacity() > 1);
+    }
+
+    #[test]
+    fn extend_from_slice() {
+        init();
+        let mut vec = SmallVec::<i32, 2>::new();
+        let slice = [1, 2, 3];
+        vec.extend_from_slice(&slice);
+        assert_eq!(vec.as_slice(), slice);
+    }
+
+    #[test]
+    fn insert() {
+        init();
+        let mut vec = SmallVec::<i32, 4>::new();
+        vec.extend_from_slice(&[1, 3, 4]);
+        vec.insert(1, 2);
+        assert_eq!(vec.as_slice(), [1, 2, 3, 4]);
+        assert_eq!(vec.len(), 4);
+        assert!(vec.is_stack());
+
+        vec.insert(4, 5);
+        assert_eq!(vec.as_slice(), [1, 2, 3, 4, 5]);
+        assert_eq!(vec.len(), 5);
+        assert!(vec.is_heap());
+    }
+
+    #[test]
+    fn delete() {
+        init();
+        let mut vec = SmallVec::<i32, 4>::new();
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+
+        vec.remove(2);
+        assert_eq!(vec.as_slice(), [1, 2, 4]);
+        vec.remove(0);
+        assert_eq!(vec.as_slice(), [2, 4]);
+        vec.remove(1);
+        assert_eq!(vec.as_slice(), [2]);
+        vec.remove(0);
+        assert!(vec.is_empty());
+    }
+
+    #[test]
+    fn clear() {
+        init();
+        let mut vec = SmallVec::<i32, 4>::new();
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+
+        vec.clear();
+        assert!(vec.is_empty());
+    }
+
+    #[test]
+    fn resize_more() {
+        init();
+        let mut vec = SmallVec::<i32, 4>::new();
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+
+        vec.resize(6, 2);
+        assert_eq!(vec.as_slice(), [1, 2, 3, 4, 2, 2]);
+    }
+
+    #[test]
+    fn resize_less() {
+        init();
+        let mut vec = SmallVec::<i32, 4>::new();
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+
+        vec.resize(2, 0);
+        assert_eq!(vec.as_slice(), [1, 2]);
+    }
+
+    #[test]
+    fn retain() {
+        init();
+        let mut vec = SmallVec::<i32, 4>::new();
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+
+        vec.retain(|&x| x % 2 == 0);
+        assert_eq!(vec.as_slice(), [2, 4]);
+    }
+
+    #[test]
+    fn shrink_to_fit() {
+        init();
+        let mut vec = SmallVec::<i32, 4>::with_capacity(128);
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+        vec.shrink_to_fit();
+        assert_eq!(vec.as_slice(), [1, 2, 3, 4]);
+        assert_eq!(vec.capacity(), 4);
+    }
+
+    #[test]
+    fn shrink_to() {
+        init();
+        let mut vec = SmallVec::<i32, 4>::with_capacity(128);
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+        vec.shrink_to(8);
+        assert_eq!(vec.as_slice(), [1, 2, 3, 4]);
+        assert_eq!(vec.capacity(), 8);
+    }
+
+    #[test]
+    fn shrink_to_too_small() {
+        init();
+        let mut vec = SmallVec::<i32, 4>::with_capacity(128);
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+        vec.shrink_to(1);
+        assert_eq!(vec.as_slice(), [1, 2, 3, 4]);
+        assert_eq!(vec.capacity(), 4);
+    }
+
+    #[test]
+    fn swap_remove() {
+        init();
+        let mut vec = SmallVec::<i32, 4>::new();
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+        let two = vec.swap_remove(1);
+        assert_eq!(two, 2);
+        assert_eq!(vec.as_slice(), [1, 4, 3]);
+    }
+
+    #[test]
+    fn truncate() {
+        init();
+        let mut vec = SmallVec::<i32, 4>::new();
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+        vec.truncate(2);
+        assert_eq!(vec.as_slice(), [1, 2]);
+    }
+
+    #[test]
+    fn spare_capacity() {
+        init();
+        let mut vec = SmallVec::<i32, 4>::with_capacity(4);
+        vec.extend_from_slice(&[1, 2, 3, 4]);
+        vec.truncate(2);
+
+        let slice = vec.spare_capacity();
+        assert_eq!(slice.len(), 2);
+        unsafe {
+            assert_eq!(slice[0].assume_init(), 3);
+            assert_eq!(slice[1].assume_init(), 4);
+        }
+
+        let slice = vec.spare_capacity_mut();
+        assert_eq!(slice.len(), 2);
+        unsafe {
+            assert_eq!(slice[0].assume_init(), 3);
+            assert_eq!(slice[1].assume_init(), 4);
+        }
+    }
+
+    #[test]
+    fn append() {
+        init();
+        let mut this = SmallVec::<i32, 4>::with_capacity(4);
+        this.extend_from_slice(&[1, 2, 3, 4]);
+        let mut other = SmallVec::<i32, 4>::with_capacity(4);
+        other.extend_from_slice(&[5, 6, 7, 8]);
+
+        this.append(&mut other);
+        assert_eq!(this.as_slice(), [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert!(other.is_empty());
+    }
+
+    #[test]
+    fn dedup() {
+        init();
+        let mut vec = SmallVec::<i32, 4>::new();
+        vec.extend_from_slice(&[1, 2, 2, 2, 3, 3, 4]);
+        vec.dedup();
+        assert_eq!(vec.as_slice(), [1, 2, 3, 4]);
     }
 }
