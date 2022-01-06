@@ -192,6 +192,21 @@ impl<T: 'static> Vec<T> {
     pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), TryReserveError> {
         let required_cap = self.len.overflow_guarded_add(additional);
         if self.capacity() < required_cap {
+            self.grow_exact(required_cap).map_err(|e| e.into())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[inline]
+    pub fn reserve(&mut self, additional: usize) {
+        self.try_reserve(additional).unwrap();
+    }
+
+    #[inline]
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
+        let required_cap = self.len.overflow_guarded_add(additional);
+        if self.capacity() < required_cap {
             self.grow_amortized(required_cap).map_err(|e| e.into())
         } else {
             Ok(())
@@ -996,6 +1011,14 @@ impl<T> From<Box<[T]>> for Vec<T> {
             ptr: ManuallyDrop::new(boxed.0),
             len,
         }
+    }
+}
+
+impl From<Box<str>> for Vec<u8> {
+    fn from(bx: Box<str>) -> Self {
+        let len = bx.len();
+        let bx: Box<[u8]> = bx.into();
+        Vec { ptr: ManuallyDrop::new(bx.0), len }
     }
 }
 

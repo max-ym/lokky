@@ -149,3 +149,9 @@ impl<T: PartialEq + Eq + Ord + PartialOrd + ?Sized> Ord for Box<T> {
         (**self).cmp(other)
     }
 }
+
+impl From<Box<str>> for Box<[u8]> {
+    fn from(bx: Box<str>) -> Self {
+        Box(bx.0.cast_str_to_bytes())
+    }
+}

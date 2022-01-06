@@ -173,6 +173,23 @@ impl<T: ?Sized> ScopeAccess<T> {
     }
 }
 
+impl ScopeAccess<str> {
+    /// Cast `str` access to raw byte slice access.
+    pub fn cast_str_to_bytes(mut self) -> ScopeAccess<[u8]> {
+        let len = self.access().len();
+        let ptr = unsafe { self.access_mut().as_bytes_mut().as_mut_ptr() };
+
+        let access = ScopeAccess {
+            ptr: unsafe { NonNull::new_unchecked(slice::from_raw_parts_mut(ptr, len)) },
+            alloc: self.alloc.clone(),
+            alloc_marker: self.alloc_marker,
+            _marker: Default::default(),
+        };
+        mem::forget(self);
+        access
+    }
+}
+
 impl<T: 'static + ?Sized> ScopeAccess<T> {
     /// Get allocation query for given access that was used to select the allocator.
     pub fn alloc_selector(&self) -> AllocSelector {

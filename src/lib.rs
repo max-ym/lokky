@@ -18,6 +18,8 @@ pub mod vec;
 
 pub mod small_vec;
 
+pub mod string;
+
 mod marker;
 
 #[cfg(test)]
