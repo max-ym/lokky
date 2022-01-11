@@ -14,6 +14,8 @@ pub mod boxed;
 
 pub mod rc;
 
+pub mod arc;
+
 pub mod vec;
 
 pub mod small_vec;
