@@ -1,18 +1,18 @@
-use core::{sync::atomic::{AtomicUsize, Ordering}, mem::{ManuallyDrop, self, MaybeUninit}, pin::Pin, ops, ptr::{self, drop_in_place}, hint, fmt, any::Any};
-use crate::{marker::MaybeDropped, scope::AllocSelector, ScopeAccess, Access, AllocError, AccessMut};
+use crate::{
+    marker::MaybeDropped, scope::AllocSelector, Access, AccessMut, AllocError, ScopeAccess,
+};
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
+use core::{
+    any::Any,
+    fmt, hint,
+    mem::{self, ManuallyDrop, MaybeUninit},
+    ops,
+    pin::Pin,
+    ptr::{self, drop_in_place},
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 const MAX_REFCOUNT: usize = isize::MAX as _;
-
-// ThreadSanitizer does not support memory fences. To avoid false positive
-// reports in Arc / Weak implementation use atomic loads for synchronization
-// instead.
-// #[cfg(sanitize = "thread")]
-// macro_rules! acquire {
-//     ($x:expr) => {
-//         $x.load(Acquire)
-//     };
-// }
 
 struct ArcInner<T: ?Sized> {
     // If `strong` is equal to usize::MAX mean a locked value. This should
@@ -76,7 +76,7 @@ impl<'a, T: ?Sized> WeakCounter<'a, T> {
     #[inline]
     fn increment_weak(&mut self, order: Ordering) -> usize {
         loop {
-            match self.try_increment_weak(Relaxed) {
+            match self.try_increment_weak(order) {
                 Ok(val) => return val,
                 Err(val) => {
                     self.val = val;
@@ -93,7 +93,9 @@ impl<'a, T: ?Sized> WeakCounter<'a, T> {
         // to deal with overflow.
         let current = self.val;
         let new = current + 1;
-        self.inner.weak.compare_exchange_weak(current, new, order, Relaxed)
+        self.inner
+            .weak
+            .compare_exchange_weak(current, new, order, Relaxed)
     }
 
     /// Whether the `weak` was locked when last read.
@@ -122,17 +124,21 @@ impl<'a, T: ?Sized> StrongCounter<'a, T> {
     #[inline]
     fn try_decrement(&mut self, order: Ordering) -> Result<usize, usize> {
         debug_assert!(self.val > 0);
-        self.inner.weak.compare_exchange_weak(self.val, self.val - 1, order, Relaxed)
+        self.inner
+            .weak
+            .compare_exchange_weak(self.val, self.val - 1, order, Relaxed)
     }
 
     #[inline]
     fn try_set_zero(&mut self, order: Ordering) -> Result<usize, usize> {
         debug_assert!(self.val > 0);
-        self.inner.weak.compare_exchange_weak(self.val, 0, order, Relaxed)
+        self.inner
+            .weak
+            .compare_exchange_weak(self.val, 0, order, Relaxed)
     }
 }
 
-impl<'a, T:? Sized> PartialEq<usize> for StrongCounter<'a, T> {
+impl<'a, T: ?Sized> PartialEq<usize> for StrongCounter<'a, T> {
     fn eq(&self, other: &usize) -> bool {
         self.val == *other
     }
@@ -151,9 +157,10 @@ impl<T: 'static> Arc<T> {
             weak: AtomicUsize::new(0),
             data: data.into(),
         };
-        Ok(Arc(ManuallyDrop::new(
-            ScopeAccess::alloc(inner, AllocSelector::new::<T>())?,
-        )))
+        Ok(Arc(ManuallyDrop::new(ScopeAccess::alloc(
+            inner,
+            AllocSelector::new::<T>(),
+        )?)))
     }
 
     #[inline]
@@ -229,15 +236,20 @@ impl<T: 'static> Arc<T> {
 
 impl<T> Arc<T> {
     pub fn try_unwrap(mut this: Self) -> Result<T, Self> {
-        if this.inner().strong.compare_exchange(1, 0, Acquire, Relaxed).is_err() {
-            // To unwrap exactly one strong reference is required.
+        if this
+            .inner()
+            .strong
+            .compare_exchange(1, 0, Acquire, Relaxed)
+            .is_err()
+        {
+            // Exactly one strong reference is required but several exist.
             return Err(this);
         }
 
         unsafe {
             // Move out the data.
             let elem = ptr::read(MaybeDropped::as_ref(&this.0.access().data));
-            
+
             // If nothing refers to the ArcInner no more then release it.
             if this.inner().weak.load(Acquire) == 0 {
                 ManuallyDrop::drop(&mut this.0);
@@ -263,7 +275,7 @@ impl<T: ?Sized> Arc<T> {
         loop {
             weak.sync_lock();
             if weak.try_increment_weak(Acquire).is_ok() {
-                return Weak(ManuallyDrop::new(unsafe { this.0.clone() }))
+                return Weak(ManuallyDrop::new(unsafe { this.0.clone() }));
             }
         }
     }
@@ -275,7 +287,7 @@ impl<T: ?Sized> Arc<T> {
         // count was 0 just before taking the lock.
         cnt.get().unwrap_or(0)
     }
-    
+
     #[inline]
     pub fn strong_count(this: &Self) -> usize {
         this.inner().strong.load(SeqCst)
@@ -316,7 +328,12 @@ impl<T: ?Sized> Arc<T> {
         // writes to `strong` (in particular in `Weak::upgrade`) prior to decrements
         // of the `weak` count (via `Weak::drop`, which uses release). If the upgraded
         // weak ref was never dropped, the CAS here will fail so we do not care to synchronize.
-        if self.inner().weak.compare_exchange(0, usize::MAX, Acquire, Relaxed).is_ok() {
+        if self
+            .inner()
+            .weak
+            .compare_exchange(0, usize::MAX, Acquire, Relaxed)
+            .is_ok()
+        {
             // This needs to be an `Acquire` to synchronize with the decrement of the `strong`
             // counter in `drop` -- the only access that happens when any but the last reference
             // is being dropped.
@@ -342,7 +359,7 @@ impl<T: ?Sized> Arc<T> {
     unsafe fn drop_slow(&mut self) {
         // Destroy the data at this time, even though we must not free the box
         // allocation itself (there might still be weak pointers lying around).
-        unsafe { ptr::drop_in_place(Self::get_mut_unchecked(self)) };
+        drop_in_place(Self::get_mut_unchecked(self));
 
         // Release the data if Weaks are not alive.
         if self.inner().load_weak(Acquire) == 0 {
@@ -350,8 +367,6 @@ impl<T: ?Sized> Arc<T> {
         }
     }
 }
-
-
 
 impl Arc<dyn Any + Send + Sync> {
     #[inline]
