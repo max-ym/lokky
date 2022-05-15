@@ -48,6 +48,7 @@ mod test {
         unsafe { ENV.assume_init_mut() }
     }
 
+    /// Initialize environment for tests.
     pub fn init() {
         use simplelog::{ColorChoice, Config, TermLogger, TerminalMode};
         let _ = TermLogger::init(
