@@ -37,34 +37,31 @@ unsafe impl<T: ?Sized + Sync + Send> Sync for Weak<T> {}
 
 impl<T: ?Sized> ArcInner<T> {
     #[inline]
-    fn load_weak(&self, order: Ordering) -> WeakCounter {
-        WeakCounter {
-            val: self.weak.load(order),
-            inner: &self.weak,
-        }
+    fn load_weak(&self, order: Ordering) -> AtomicCounter {
+        AtomicCounter::new(&self.weak, order)
     }
 
     #[inline]
-    fn load_strong(&self, order: Ordering) -> StrongCounter {
-        StrongCounter {
-            val: self.strong.load(order),
-            inner: &self.strong,
-        }
+    fn load_strong(&self, order: Ordering) -> AtomicCounter {
+        AtomicCounter::new(&self.strong, order)
     }
 }
 
-pub(crate) struct WeakCounter<'a> {
-    val: usize,
-    inner: &'a AtomicUsize,
+pub(crate) struct AtomicCounter<'a> {
+    pub(crate) val: usize,
+    pub(crate) inner: &'a AtomicUsize,
 }
 
-pub(crate) struct StrongCounter<'a> {
-    val: usize,
-    inner: &'a AtomicUsize,
-}
+impl<'a> AtomicCounter<'a> {
+    #[inline]
+    pub(crate) fn new(inner: &'a AtomicUsize, order: Ordering) -> Self {
+        AtomicCounter {
+            val: inner.load(order),
+            inner,
+        }
+    }
 
-impl<'a> WeakCounter<'a> {
-    /// Check if the weak counter is currently "locked"; if so, spin.
+    /// Check if the counter is currently "locked"; if so, spin.
     #[inline]
     pub(crate) fn sync_lock(&mut self) {
         while self.is_locked() {
@@ -74,9 +71,9 @@ impl<'a> WeakCounter<'a> {
     }
 
     #[inline]
-    pub(crate) fn increment_weak(&mut self, order: Ordering) -> usize {
+    pub(crate) fn increment(&mut self, order: Ordering) -> usize {
         loop {
-            match self.try_increment_weak(order) {
+            match self.try_increment(order) {
                 Ok(val) => return val,
                 Err(val) => {
                     self.val = val;
@@ -87,7 +84,7 @@ impl<'a> WeakCounter<'a> {
     }
 
     #[inline]
-    pub(crate) fn try_increment_weak(&mut self, order: Ordering) -> Result<usize, usize> {
+    pub(crate) fn try_increment(&mut self, order: Ordering) -> Result<usize, usize> {
         // TODO: this code currently ignores the possibility of overflow
         // into usize::MAX; in general both Rc and Arc need to be adjusted
         // to deal with overflow.
@@ -96,7 +93,21 @@ impl<'a> WeakCounter<'a> {
         self.inner.compare_exchange_weak(current, new, order, Relaxed)
     }
 
-    /// Whether the `weak` was locked when last read.
+    #[inline]
+    pub(crate) fn try_decrement(&mut self, order: Ordering) -> Result<usize, usize> {
+        debug_assert!(self.val > 0);
+        self.inner
+            .compare_exchange_weak(self.val, self.val - 1, order, Relaxed)
+    }
+
+    #[inline]
+    pub(crate) fn try_set_zero(&mut self, order: Ordering) -> Result<usize, usize> {
+        debug_assert!(self.val > 0);
+        self.inner
+            .compare_exchange_weak(self.val, 0, order, Relaxed)
+    }
+
+    /// Whether the counter was locked when last read.
     #[inline]
     pub(crate) fn is_locked(&self) -> bool {
         self.val == usize::MAX
@@ -112,29 +123,7 @@ impl<'a> WeakCounter<'a> {
     }
 }
 
-impl<'a> PartialEq<usize> for WeakCounter<'a> {
-    fn eq(&self, other: &usize) -> bool {
-        self.val == *other
-    }
-}
-
-impl<'a> StrongCounter<'a> {
-    #[inline]
-    pub(crate) fn try_decrement(&mut self, order: Ordering) -> Result<usize, usize> {
-        debug_assert!(self.val > 0);
-        self.inner
-            .compare_exchange_weak(self.val, self.val - 1, order, Relaxed)
-    }
-
-    #[inline]
-    pub(crate) fn try_set_zero(&mut self, order: Ordering) -> Result<usize, usize> {
-        debug_assert!(self.val > 0);
-        self.inner
-            .compare_exchange_weak(self.val, 0, order, Relaxed)
-    }
-}
-
-impl<'a> PartialEq<usize> for StrongCounter<'a> {
+impl<'a> PartialEq<usize> for AtomicCounter<'a> {
     fn eq(&self, other: &usize) -> bool {
         self.val == *other
     }
@@ -200,7 +189,7 @@ impl<T: 'static> Arc<T> {
                 // The deallocation is possible because we will set `strong` to zero and
                 // if all Weaks will be Dropped in the other threads, the last Weak will
                 // deallocate ArcInner.
-                weak.increment_weak(Release);
+                weak.increment(Release);
                 let _weak_struct = unsafe { Weak(ManuallyDrop::new(this.0.clone())) };
 
                 // Set strong to zero to indicate ArcInner does not own any data no more.
@@ -270,7 +259,7 @@ impl<T: ?Sized> Arc<T> {
         let mut weak = this.inner().load_weak(Relaxed);
         loop {
             weak.sync_lock();
-            if weak.try_increment_weak(Acquire).is_ok() {
+            if weak.try_increment(Acquire).is_ok() {
                 return Weak(ManuallyDrop::new(unsafe { this.0.clone() }));
             }
         }
