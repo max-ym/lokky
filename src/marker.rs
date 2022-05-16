@@ -166,6 +166,18 @@ impl<T> MaybeDropped<T> {
     }
 }
 
+impl<T> UnsafeFrom<MaybeDropped<T>> for T {
+    unsafe fn unsafe_from(value: MaybeDropped<T>) -> Self {
+        MaybeDropped::into_inner(value)
+    }
+}
+
+impl<T> UnsafeFrom<ExpectSurvive<MaybeDropped<T>>> for ExpectSurvive<T> {
+    unsafe fn unsafe_from(value: ExpectSurvive<MaybeDropped<T>>) -> Self {
+        ExpectSurvive(&value.0.0)
+    }
+}
+
 pub(crate) fn clone_scope_access<T: ?Sized>(
     access: &ManuallyDrop<ScopeAccess<T>>,
 ) -> ManuallyDrop<ScopeAccess<T>> {
