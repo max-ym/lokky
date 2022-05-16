@@ -435,7 +435,7 @@ impl<T: ?Sized + PartialEq> PartialEq for Arc<T> {
     }
 }
 
-impl<T: ?Sized + Eq> Eq for Arc<T> {}
+impl<T: ?Sized + Eq + PartialEq> Eq for Arc<T> {}
 
 impl<T: ?Sized + PartialOrd> PartialOrd for Arc<T> {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
@@ -459,7 +459,7 @@ impl<T: ?Sized + PartialOrd> PartialOrd for Arc<T> {
     }
 }
 
-impl<T: ?Sized + Ord> Ord for Arc<T> {
+impl<T: ?Sized + Ord + PartialOrd> Ord for Arc<T> {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         (**self).cmp(&**other)
     }
