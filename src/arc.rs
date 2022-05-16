@@ -37,44 +37,44 @@ unsafe impl<T: ?Sized + Sync + Send> Sync for Weak<T> {}
 
 impl<T: ?Sized> ArcInner<T> {
     #[inline]
-    fn load_weak(&self, order: Ordering) -> WeakCounter<T> {
+    fn load_weak(&self, order: Ordering) -> WeakCounter {
         WeakCounter {
             val: self.weak.load(order),
-            inner: self,
+            inner: &self.weak,
         }
     }
 
     #[inline]
-    fn load_strong(&self, order: Ordering) -> StrongCounter<T> {
+    fn load_strong(&self, order: Ordering) -> StrongCounter {
         StrongCounter {
             val: self.strong.load(order),
-            inner: self,
+            inner: &self.strong,
         }
     }
 }
 
-struct WeakCounter<'a, T: ?Sized> {
+pub(crate) struct WeakCounter<'a> {
     val: usize,
-    inner: &'a ArcInner<T>,
+    inner: &'a AtomicUsize,
 }
 
-struct StrongCounter<'a, T: ?Sized> {
+pub(crate) struct StrongCounter<'a> {
     val: usize,
-    inner: &'a ArcInner<T>,
+    inner: &'a AtomicUsize,
 }
 
-impl<'a, T: ?Sized> WeakCounter<'a, T> {
+impl<'a> WeakCounter<'a> {
     /// Check if the weak counter is currently "locked"; if so, spin.
     #[inline]
-    fn sync_lock(&mut self) {
+    pub(crate) fn sync_lock(&mut self) {
         while self.is_locked() {
             hint::spin_loop();
-            self.val = self.inner.weak.load(Relaxed);
+            self.val = self.inner.load(Relaxed);
         }
     }
 
     #[inline]
-    fn increment_weak(&mut self, order: Ordering) -> usize {
+    pub(crate) fn increment_weak(&mut self, order: Ordering) -> usize {
         loop {
             match self.try_increment_weak(order) {
                 Ok(val) => return val,
@@ -87,25 +87,23 @@ impl<'a, T: ?Sized> WeakCounter<'a, T> {
     }
 
     #[inline]
-    fn try_increment_weak(&mut self, order: Ordering) -> Result<usize, usize> {
+    pub(crate) fn try_increment_weak(&mut self, order: Ordering) -> Result<usize, usize> {
         // TODO: this code currently ignores the possibility of overflow
         // into usize::MAX; in general both Rc and Arc need to be adjusted
         // to deal with overflow.
         let current = self.val;
         let new = current + 1;
-        self.inner
-            .weak
-            .compare_exchange_weak(current, new, order, Relaxed)
+        self.inner.compare_exchange_weak(current, new, order, Relaxed)
     }
 
     /// Whether the `weak` was locked when last read.
     #[inline]
-    fn is_locked(&self) -> bool {
+    pub(crate) fn is_locked(&self) -> bool {
         self.val == usize::MAX
     }
 
     #[inline]
-    fn get(&self) -> Result<usize, ()> {
+    pub(crate) fn get(&self) -> Result<usize, ()> {
         if self.is_locked() {
             Err(())
         } else {
@@ -114,31 +112,29 @@ impl<'a, T: ?Sized> WeakCounter<'a, T> {
     }
 }
 
-impl<'a, T: ?Sized> PartialEq<usize> for WeakCounter<'a, T> {
+impl<'a> PartialEq<usize> for WeakCounter<'a> {
     fn eq(&self, other: &usize) -> bool {
         self.val == *other
     }
 }
 
-impl<'a, T: ?Sized> StrongCounter<'a, T> {
+impl<'a> StrongCounter<'a> {
     #[inline]
-    fn try_decrement(&mut self, order: Ordering) -> Result<usize, usize> {
+    pub(crate) fn try_decrement(&mut self, order: Ordering) -> Result<usize, usize> {
         debug_assert!(self.val > 0);
         self.inner
-            .weak
             .compare_exchange_weak(self.val, self.val - 1, order, Relaxed)
     }
 
     #[inline]
-    fn try_set_zero(&mut self, order: Ordering) -> Result<usize, usize> {
+    pub(crate) fn try_set_zero(&mut self, order: Ordering) -> Result<usize, usize> {
         debug_assert!(self.val > 0);
         self.inner
-            .weak
             .compare_exchange_weak(self.val, 0, order, Relaxed)
     }
 }
 
-impl<'a, T: ?Sized> PartialEq<usize> for StrongCounter<'a, T> {
+impl<'a> PartialEq<usize> for StrongCounter<'a> {
     fn eq(&self, other: &usize) -> bool {
         self.val == *other
     }
