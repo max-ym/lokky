@@ -90,7 +90,8 @@ impl<'a> AtomicCounter<'a> {
         // to deal with overflow.
         let current = self.val;
         let new = current + 1;
-        self.inner.compare_exchange_weak(current, new, order, Relaxed)
+        self.inner
+            .compare_exchange_weak(current, new, order, Relaxed)
     }
 
     #[inline]
