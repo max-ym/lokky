@@ -306,7 +306,7 @@ impl<T: ?Sized> Arc<T> {
     ///
     /// Note that this requires locking the weak ref count.
     #[inline]
-    fn is_unique(&mut self) -> bool {
+    fn is_unique(&self) -> bool {
         // Lock the weak pointer count if no Weaks exist.
         //
         // The acquire label here ensures a happens-before relationship with any
