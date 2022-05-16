@@ -104,13 +104,13 @@ impl Env {
     }
 
     /// Spawn new scope to execute function in it.
-    pub fn spawn<T, S: 'static>(
+    pub fn spawn<T, S>(
         &mut self,
         mut scope_init: impl FnMut(&dyn Scope) -> S,
         mut f: impl FnMut(&mut S) -> T,
     ) -> T
     where
-        S: Scope,
+        S: Scope + 'static,
     {
         use crate::marker::UnsafeFrom;
         unsafe {
@@ -118,7 +118,7 @@ impl Env {
             let prev: &mut dyn Scope = impose_lifetime_mut(self.cur.as_mut());
             let mut new_scope = scope_init(&*prev);
             // SAFETY: new scope will survive scope execution by definition.
-            self.cur = ScopedMut::unsafe_from(&mut new_scope);
+            self.cur = ScopedMut::unsafe_from(&mut new_scope as &mut (dyn Scope + 'static));
 
             let t = f(&mut new_scope);
             // SAFETY: we will give up execution to previous scope so restore previous
