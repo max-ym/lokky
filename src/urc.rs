@@ -10,6 +10,7 @@
 //! if it is referred to by more than one thread since one thread does not have any means to
 //! synchronize such data with each another.
 
+use core::{fmt, mem, ptr};
 use core::cell::Cell;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::Deref;
@@ -17,11 +18,9 @@ use core::pin::Pin;
 use core::ptr::drop_in_place;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-use core::{fmt, mem, ptr};
-
+use crate::{Access, AccessMut, AllocError, ScopeAccess};
 use crate::marker::{MaybeDropped, Scoped, UnsafeFrom, UnsafeInto};
 use crate::scope::AllocSelector;
-use crate::{Access, AccessMut, AllocError, ScopeAccess};
 
 /// Urc that can be sent over the thread boundaries.
 pub struct Fence<T: ?Sized> {
@@ -29,6 +28,8 @@ pub struct Fence<T: ?Sized> {
     weak: Cell<usize>,
     master: ManuallyDrop<ScopeAccess<Master<T>>>,
 }
+
+unsafe impl<T: ?Sized> Send for Fence<T> {}
 
 impl<T: ?Sized> Fence<T> {
     #[inline]
@@ -75,6 +76,19 @@ impl<T: ?Sized> Fence<T> {
         let v = self.strong.get();
         debug_assert!(v > 0);
         self.strong.set(v - 1);
+    }
+}
+
+impl<T> Fence<T> {
+    /// Create `Urc` for this `Fence`.
+    pub fn into_urc(self) -> Urc<T> {
+        use crate::boxed::Box;
+
+        let data = unsafe { Scoped::unsafe_from(&self.master.access().data).unsafe_into() };
+        Urc {
+            fence: ManuallyDrop::new(Box::new(self).0),
+            data,
+        }
     }
 }
 
