@@ -272,6 +272,57 @@ impl<T> Urc<T> {
             Ok(elem)
         }
     }
+
+    #[inline]
+    pub fn make_mut(this: &mut Self) -> &mut T {
+        todo!()
+    }
+
+    #[inline]
+    pub unsafe fn get_mut_unchecked(this: &mut Self) -> &mut T {
+        // Accessing the master here since `data` is not mutable.
+        MaybeDropped::as_mut(&mut this.master_mut().data)
+    }
+
+    #[inline]
+    pub fn get_mut(this: &mut Self) -> Option<&mut T> {
+        if this.is_unique() {
+            // This unsafety is ok because we're guaranteed that the pointer
+            // returned is the *only* pointer that will ever be returned to T. Our
+            // reference count is guaranteed to be 1 at this point, and we required
+            // the Urc itself to be `mut`, so we're returning the only possible
+            // reference to the inner data.
+            unsafe { Some(Urc::get_mut_unchecked(this)) }
+        } else {
+            None
+        }
+    }
+
+    /// Determine whether this is the unique reference (including weak refs) to
+    /// the underlying data.
+    #[inline]
+    fn is_unique(&self) -> bool {
+        // See 'Arc' impl of the same function for more details.
+
+        if self
+            .master()
+            .weak_fence
+            .compare_exchange(0, usize::MAX, Acquire, Relaxed)
+            .is_ok()
+        {
+            let unique_fence = self.master().strong_fence.load(Acquire) == 1;
+            if unique_fence {
+                self.master().weak_fence.store(0, Release);
+                // Since there is only one Fence then only this thread owns the data
+                // so it is safe to proceed without synchronization.
+                self.fence().strong_count() == 1 && self.fence().weak_count() == 0
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
 }
 
 impl Urc<dyn Any + Send + Sync> {
