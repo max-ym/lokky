@@ -18,6 +18,7 @@ use core::pin::Pin;
 use core::ptr::drop_in_place;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use core::any::Any;
 use crate::{Access, AccessMut, AllocError, ScopeAccess};
 use crate::marker::{MaybeDropped, Scoped, UnsafeFrom, UnsafeInto};
 use crate::scope::AllocSelector;
@@ -269,6 +270,25 @@ impl<T> Urc<T> {
             mem::forget(this);
 
             Ok(elem)
+        }
+    }
+}
+
+impl Urc<dyn Any + Send + Sync> {
+    #[inline]
+    pub fn downcast<T>(self) -> Result<Urc<T>, Self>
+        where
+            T: Any + Send + Sync,
+    {
+        if (*self).is::<T>() {
+            unsafe {
+                let fence = ManuallyDrop::new(self.fence.clone().cast::<Fence<T>>());
+                let data = Scoped::unsafe_from(&fence.access().master.access().data).unsafe_into();
+                mem::forget(self);
+                Ok(Urc { fence, data })
+            }
+        } else {
+            Err(self)
         }
     }
 }
