@@ -20,6 +20,7 @@ use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use core::any::Any;
 use crate::{Access, AccessMut, AllocError, ScopeAccess};
+use crate::arc::AtomicCounter;
 use crate::marker::{MaybeDropped, Scoped, UnsafeFrom, UnsafeInto};
 use crate::scope::AllocSelector;
 
@@ -273,9 +274,77 @@ impl<T> Urc<T> {
         }
     }
 
-    #[inline]
-    pub fn make_mut(this: &mut Self) -> &mut T {
-        todo!()
+    pub fn make_mut(this: &mut Self) -> &mut T
+        where
+            T: Clone,
+    {
+        // Clone the data into new Urc.
+        macro_rules! clone(
+            () => {{
+                *this = Self::new((*this.data).clone());
+                unsafe { Urc::get_mut_unchecked(this) }
+            }};
+        );
+
+        // Move out the data to another completely new Master.
+        macro_rules! move_out(
+            () => {{
+                let data = unsafe { ptr::read(this.as_ref()) };
+                // Set strong to zero to indicate this Fence/Master
+                // does not own any data no more.
+                this.fence_mut().strong.set(0);
+                this.master_mut().strong_fence.store(0, Release);
+
+                *this = Self::new(data);
+                unsafe { Urc::get_mut_unchecked(this) }
+            }};
+        );
+
+        if this.master().strong_fence.load(Acquire) == 1 {
+            // This is the only thread that has strong references.
+
+            if this.fence().weak_count() != 0 {
+                if this.master().weak_fence.load(Acquire) == 1 {
+                    // This is the only thread that has weak references.
+                    //
+                    // Since this is the only thread holding the data
+                    // (strong and weak fences == 1)
+                    // we are safe to proceed without synchronization.
+
+                    if this.fence().strong_count() == 1 {
+                        // Disassociate weak pointers from the data.
+                        move_out!()
+                    } else {
+                        clone!()
+                    }
+                } else {
+                    // This is _not_ the only thread that has weak references.
+                    // We need to keep synchronization for data access.
+
+                    // Move out the data to a new Urc.
+                    // Since this thread still holds some Weaks, we have no fear
+                    // the Master not the Fence will get deallocated by other thread
+                    // during this process.
+                    move_out!()
+                }
+            } else {
+                // The other thread still owns Weaks.
+                // Create a new Weak in this thread to prevent Master from deallocation
+                // during the data move here. It will also clean any resources at the end
+                // if needed by its Drop implementation.
+
+                let mut weak_fence = AtomicCounter::new(&this.master().weak_fence, Acquire);
+                weak_fence.increment(Release);
+                let _ = unsafe { Weak {
+                    fence: Scoped::unsafe_from(this.fence()),
+                    master: Scoped::unsafe_from(this.master()),
+                }};
+
+                move_out!()
+            }
+        } else {
+            clone!()
+        }
     }
 
     #[inline]
