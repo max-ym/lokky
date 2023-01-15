@@ -178,6 +178,12 @@ impl<T> UnsafeFrom<ExpectSurvive<MaybeDropped<T>>> for ExpectSurvive<T> {
     }
 }
 
+impl<T> UnsafeFrom<ExpectSurviveMut<MaybeDropped<T>>> for ExpectSurviveMut<T> {
+    unsafe fn unsafe_from(value: ExpectSurviveMut<MaybeDropped<T>>) -> Self {
+        ExpectSurviveMut(&mut value.0.0)
+    }
+}
+
 pub(crate) fn clone_scope_access<T: ?Sized>(
     access: &ManuallyDrop<ScopeAccess<T>>,
 ) -> ManuallyDrop<ScopeAccess<T>> {
