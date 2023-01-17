@@ -24,7 +24,14 @@ use crate::arc::AtomicCounter;
 use crate::marker::{MaybeDropped, Scoped, UnsafeFrom, UnsafeInto};
 use crate::scope::AllocSelector;
 
-/// Urc that can be sent over the thread boundaries.
+/// `Fence` allows to share the data behind `Urc` between threads.
+/// Each `Urc` in a single thread points to it's corresponding `Fence`.
+/// Each same thread cloning of `Urc` is then performed as on plain `Rc`
+/// with no performance penalty of synchronization as in `Arc`. The actual
+/// synchronization is performed only when the the `Fence` itself is manipulated on.
+/// For example, if all `Urc` and `Weak` are dropped for this `Fence` then
+/// it is deallocated and only then the synchronization actually is performed to update
+/// the global counters in the master behind the `Fences` for the data.
 pub struct Fence<T: ?Sized> {
     strong: Cell<usize>,
     weak: Cell<usize>,
@@ -180,6 +187,23 @@ impl<T: ?Sized> Urc<T> {
     #[inline(always)]
     fn fence_mut(&mut self) -> &mut Fence<T> {
         self.fence.access_mut()
+    }
+
+    #[inline]
+    pub fn try_into_fence(mut this: Self) -> Result<ScopeAccess<Fence<T>>, Self> {
+        if this.fence().strong_count() == 1 && this.fence().weak_count() == 0 {
+            // Take out `Fence` from old Urc and "forget" it to avoid running Drop.
+            let fence = unsafe {
+                let dangling = ScopeAccess::dangling_in(&this.fence);
+                mem::replace(
+                    &mut this.fence, ManuallyDrop::new(dangling)
+                )
+            };
+            mem::forget(this);
+            Ok(ManuallyDrop::into_inner(fence))
+        } else {
+            Err(this)
+        }
     }
 }
 
