@@ -252,6 +252,16 @@ impl<T> ScopeAccess<T> {
             _marker: Default::default(),
         }
     }
+
+    /// Create the dangling access with the same marker and allocator as the given access.
+    ///
+    /// # Safety
+    /// The pointed-to memory location should not be accessed. Access destructor should
+    /// be prevented from running as this would attempt to deallocate memory which was never
+    /// allocated for this access.
+    pub unsafe fn dangling_in(other: &Self) -> Self {
+        Self::dangling(other.alloc.as_ref(), other.alloc_marker)
+    }
 }
 
 impl<T: ?Sized> ScopeAccess<T> {
