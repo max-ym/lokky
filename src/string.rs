@@ -214,6 +214,8 @@ impl String {
         unsafe { String::from_utf8_unchecked(other) }
     }
 
+    /// # Safety
+    /// `bytes` must be valid UTF-8.
     #[inline]
     #[must_use]
     pub unsafe fn from_utf8_unchecked(bytes: Vec<u8>) -> String {
@@ -602,7 +604,7 @@ impl core::ops::IndexMut<core::ops::RangeFrom<usize>> for String {
 impl core::ops::IndexMut<core::ops::RangeFull> for String {
     #[inline]
     fn index_mut(&mut self, _index: core::ops::RangeFull) -> &mut str {
-        unsafe { core::str::from_utf8_unchecked_mut(&mut *self.vec) }
+        unsafe { core::str::from_utf8_unchecked_mut(&mut self.vec) }
     }
 }
 

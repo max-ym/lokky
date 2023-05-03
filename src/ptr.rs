@@ -6,62 +6,31 @@ use core::marker::PhantomData;
 use core::mem::{self, size_of, transmute};
 use core::ptr::NonNull;
 use core::{ptr, slice};
+use core::ops::{Deref, DerefMut};
 
-/// The access to the memory location that stores some type `T`.
-pub trait Access<T: ?Sized> {
-    fn access(&self) -> &T;
-}
-
-/// The mutable access to the memory that stores some type `T`.
-pub trait AccessMut<T: ?Sized>: Access<T> {
-    fn access_mut(&mut self) -> &mut T;
-}
-
-/// A wrapper type for a reference to type `T`.
-pub struct RefAccess<'a, T: ?Sized>(&'a T);
-
-/// A wrapper type for a mutable reference to type `T`.
-pub struct MutAccess<'a, T: ?Sized>(&'a mut T);
-
-/// The access that is guaranteed to be valid in some scope.
-pub struct ScopeAccess<T: ?Sized> {
+/// The pointer that is guaranteed to be valid in some scope.
+pub struct ScopePtr<T: ?Sized> {
     ptr: NonNull<T>,
     alloc: Scoped<dyn GlobalAlloc>,
     alloc_marker: AllocMarker,
     _marker: PhantomData<T>,
 }
 
-impl<'a, T: ?Sized> Access<T> for RefAccess<'a, T> {
-    fn access(&self) -> &T {
-        self.0
-    }
-}
+impl<T: ?Sized> Deref for ScopePtr<T> {
+    type Target = T;
 
-impl<'a, T: ?Sized> Access<T> for MutAccess<'a, T> {
-    fn access(&self) -> &T {
-        self.0
-    }
-}
-
-impl<'a, T: ?Sized> AccessMut<T> for MutAccess<'a, T> {
-    fn access_mut(&mut self) -> &mut T {
-        self.0
-    }
-}
-
-impl<T: ?Sized> Access<T> for ScopeAccess<T> {
-    fn access(&self) -> &T {
+    fn deref(&self) -> &T {
         unsafe { self.ptr.as_ref() }
     }
 }
 
-impl<T: ?Sized> AccessMut<T> for ScopeAccess<T> {
-    fn access_mut(&mut self) -> &mut T {
+impl<T: ?Sized> DerefMut for ScopePtr<T> {
+    fn deref_mut(&mut self) -> &mut T {
         unsafe { self.ptr.as_mut() }
     }
 }
 
-impl<T: ?Sized> Drop for ScopeAccess<T> {
+impl<T: ?Sized> Drop for ScopePtr<T> {
     fn drop(&mut self) {
         trace!("dropping ScopeAccess ({:#?})", self.ptr.as_ptr());
         unsafe {
@@ -71,17 +40,17 @@ impl<T: ?Sized> Drop for ScopeAccess<T> {
     }
 }
 
-impl<T: ?Sized> ScopeAccess<T> {
-    /// Create scope access from raw parts.
+impl<T: ?Sized> ScopePtr<T> {
+    /// Create scope pointer from raw parts.
     ///
     /// # Safety
-    /// Creating scope access from raw parts is unsafe as the caller should guarantee that:
+    /// Creating scope pointer from raw parts is unsafe as the caller should guarantee that:
     /// * pointer is valid
     /// * provided allocator was actually the one used to allocate given pointed-to value
     /// * allocator marker should be valid and actually used for given allocation
     pub unsafe fn new(ptr: NonNull<T>, alloc: &dyn GlobalAlloc, alloc_marker: AllocMarker) -> Self {
         trace!("new ScopeAccess {:#?}", ptr.as_ptr());
-        ScopeAccess {
+        ScopePtr {
             ptr,
             alloc: transmute(alloc),
             alloc_marker,
@@ -89,14 +58,14 @@ impl<T: ?Sized> ScopeAccess<T> {
         }
     }
 
-    /// Cast the type for scope access. Only pointer type is changed but actual data
+    /// Cast the type for scope pointer. Only pointer type is changed but actual data
     /// is not modified.
     ///
     /// # Safety
     /// The data should be correctly aligned. The pointed-to data will be reinterpreted as if it
     /// has the other type which may lead to undefined behaviour.
-    pub unsafe fn cast<O>(self) -> ScopeAccess<O> {
-        let access = ScopeAccess {
+    pub unsafe fn cast<O>(self) -> ScopePtr<O> {
+        let access = ScopePtr {
             ptr: self.ptr.cast(),
             alloc: self.alloc.clone(),
             alloc_marker: self.alloc_marker,
@@ -106,16 +75,16 @@ impl<T: ?Sized> ScopeAccess<T> {
         access
     }
 
-    /// Change the access to the value to access to the array of values.
+    /// Change the pointer to the value to access to the array of values.
     ///
     /// # Safety
     /// The length of the slice should not be larger than the actual slice length so that
     /// memory accesses will be valid.
-    pub unsafe fn cast_to_slice(self, len: usize) -> ScopeAccess<[T]>
+    pub unsafe fn cast_to_slice(self, len: usize) -> ScopePtr<[T]>
     where
         T: Sized,
     {
-        let access = ScopeAccess {
+        let access = ScopePtr {
             ptr: NonNull::new_unchecked(slice::from_raw_parts_mut(self.ptr.as_ptr(), len)),
             alloc: self.alloc.clone(),
             alloc_marker: self.alloc_marker,
@@ -125,28 +94,28 @@ impl<T: ?Sized> ScopeAccess<T> {
         access
     }
 
-    /// Change the access to the value to access to the array of values.
+    /// Change the pointer to the value to access to the array of values.
     ///
     /// # Safety
     /// The length of the slice should not be larger than the actual slice length so that
     /// memory accesses will be valid.
-    pub unsafe fn slice_ref(&self, len: usize) -> RefAccess<[T]>
+    pub unsafe fn slice_ref(&self, len: usize) -> &[T]
     where
         T: Sized,
     {
-        RefAccess(slice::from_raw_parts(self.ptr.as_ptr(), len))
+        slice::from_raw_parts(self.ptr.as_ptr(), len)
     }
 
-    /// Change the access to the value to access to the array of values.
+    /// Change the pointer to the value to access to the array of values.
     ///
     /// # Safety
     /// The length of the slice should not be larger than the actual slice length so that
     /// memory accesses will be valid.
-    pub unsafe fn slice_mut(&mut self, len: usize) -> MutAccess<[T]>
+    pub unsafe fn slice_mut(&mut self, len: usize) -> &mut [T]
     where
         T: Sized,
     {
-        MutAccess(slice::from_raw_parts_mut(self.ptr.as_ptr(), len))
+        slice::from_raw_parts_mut(self.ptr.as_ptr(), len)
     }
 
     /// Create the clone of the access.
@@ -154,7 +123,7 @@ impl<T: ?Sized> ScopeAccess<T> {
     /// # Safety
     /// This may lead to double-free if both the original and cloned access will get dropped.
     pub unsafe fn clone(&self) -> Self {
-        ScopeAccess {
+        ScopePtr {
             ptr: self.ptr,
             alloc: self.alloc.clone(),
             alloc_marker: self.alloc_marker,
@@ -173,13 +142,13 @@ impl<T: ?Sized> ScopeAccess<T> {
     }
 }
 
-impl ScopeAccess<str> {
-    /// Cast `str` access to raw byte slice access.
-    pub fn cast_str_to_bytes(mut self) -> ScopeAccess<[u8]> {
-        let len = self.access().len();
-        let ptr = unsafe { self.access_mut().as_bytes_mut().as_mut_ptr() };
+impl ScopePtr<str> {
+    /// Cast `str` pointer to raw byte slice pointer.
+    pub fn cast_str_to_bytes(mut self) -> ScopePtr<[u8]> {
+        let len = self.len();
+        let ptr = unsafe { self.as_bytes_mut().as_mut_ptr() };
 
-        let access = ScopeAccess {
+        let access = ScopePtr {
             ptr: unsafe { NonNull::new_unchecked(slice::from_raw_parts_mut(ptr, len)) },
             alloc: self.alloc.clone(),
             alloc_marker: self.alloc_marker,
@@ -190,8 +159,8 @@ impl ScopeAccess<str> {
     }
 }
 
-impl<T: 'static + ?Sized> ScopeAccess<T> {
-    /// Get allocation query for given access that was used to select the allocator.
+impl<T: 'static + ?Sized> ScopePtr<T> {
+    /// Get allocation query for given pointer that was used to select the allocator.
     pub fn alloc_selector(&self) -> AllocSelector {
         AllocSelector::with_marker::<T>(self.marker())
     }
@@ -206,13 +175,13 @@ pub enum ArrayAllocError {
     AllocError(AllocError),
 }
 
-impl<T> ScopeAccess<T> {
+impl<T> ScopePtr<T> {
     /// Allocate the given value on the heap of the current scope. Given query will be used
     /// to select appropriate allocator.
     pub fn alloc(value: T, selector: AllocSelector) -> Result<Self, AllocError> {
-        let mut access = Self::alloc_layout(Layout::for_value(&value), selector)?;
-        *access.access_mut() = value;
-        Ok(access)
+        let mut ptr = Self::alloc_layout(Layout::for_value(&value), selector)?;
+        *ptr = value;
+        Ok(ptr)
     }
 
     /// Allocate memory using given `Layout` and `AllocQuery`.
@@ -222,7 +191,7 @@ impl<T> ScopeAccess<T> {
         let mem = unsafe { alloc.alloc(layout) as *mut T };
         if let Some(ptr) = NonNull::new(mem) {
             // SAFETY: all parameters are guaranteed to be correct in the code above.
-            let alloc = unsafe { ScopeAccess::new(ptr, alloc, selector.marker()) };
+            let alloc = unsafe { ScopePtr::new(ptr, alloc, selector.marker()) };
             Ok(alloc)
         } else {
             Err(AllocError)
@@ -238,14 +207,14 @@ impl<T> ScopeAccess<T> {
         }
     }
 
-    /// Create the dangling access.
+    /// Create the dangling pointer.
     ///
     /// # Safety
     /// The pointed-to memory location should not be accessed. Access destructor should
     /// be prevented from running as this would attempt to deallocate memory which was never
-    /// allocated for this access.
+    /// allocated for this pointer.
     pub unsafe fn dangling(alloc: &dyn GlobalAlloc, alloc_marker: AllocMarker) -> Self {
-        ScopeAccess {
+        ScopePtr {
             ptr: NonNull::dangling(),
             alloc: transmute(alloc),
             alloc_marker,
@@ -253,18 +222,18 @@ impl<T> ScopeAccess<T> {
         }
     }
 
-    /// Create the dangling access with the same marker and allocator as the given access.
+    /// Create the dangling pointer with the same marker and allocator as the given pointer.
     ///
     /// # Safety
     /// The pointed-to memory location should not be accessed. Access destructor should
     /// be prevented from running as this would attempt to deallocate memory which was never
-    /// allocated for this access.
+    /// allocated for this pointer.
     pub unsafe fn dangling_in(other: &Self) -> Self {
         Self::dangling(other.alloc.as_ref(), other.alloc_marker)
     }
 }
 
-impl<T: ?Sized> ScopeAccess<T> {
+impl<T: ?Sized> ScopePtr<T> {
     /// Deallocate memory.
     ///
     /// # Safety
@@ -276,7 +245,7 @@ impl<T: ?Sized> ScopeAccess<T> {
     }
 }
 
-impl<T> ScopeAccess<[T]> {
+impl<T> ScopePtr<[T]> {
     /// Allocate uninitialized array. Given query will be used
     /// to select appropriate allocator.
     pub fn alloc_array_uninit(
@@ -284,7 +253,7 @@ impl<T> ScopeAccess<[T]> {
         selector: AllocSelector,
     ) -> Result<Self, ArrayAllocError> {
         use ArrayAllocError::*;
-        ScopeAccess::<T>::alloc_layout(
+        ScopePtr::<T>::alloc_layout(
             Layout::array::<T>(capacity).map_err(|_| CapacityOverflow)?,
             selector,
         )
@@ -302,9 +271,8 @@ impl<T> ScopeAccess<[T]> {
         trace!("realloc array");
         let ptr = self.alloc.realloc(
             self.ptr.as_ptr() as _,
-            // TODO: use unwrap_unchecked instead when stable (issue 81383).
             // SAFETY: we already constructed such Layout before to allocate - it will not fail.
-            Layout::array::<T>(self.access().len()).map_err(|_| CapacityOverflow)?,
+            Layout::array::<T>(self.len()).unwrap_unchecked(),
             new_capacity * size_of::<T>(),
         );
         if ptr.is_null() {

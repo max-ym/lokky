@@ -14,13 +14,10 @@ pub struct Env {
 
 /// Allocator Marker provides information to indicate which allocator to select for given
 /// allocation.
-#[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
+#[derive(Default, Copy, Clone, Eq, PartialEq, Debug, Hash)]
 pub enum AllocMarker {
     /// No marker used.
-    None,
-
-    /// Plain integer marker.
-    Marker(u64),
+    #[default] None,
 
     /// Type-based marker. It is expected to use unit structures, for example,
     /// MonsterMarker or NpcMarker.
@@ -28,27 +25,10 @@ pub enum AllocMarker {
 }
 
 impl AllocMarker {
-    /// Create marker based on an integer value.
-    pub fn from_u64(val: u64) -> Self {
-        AllocMarker::Marker(val)
-    }
-
     /// Create marker based on a type. It is expected to use unit structures, for example,
     /// MonsterMarker or NpcMarker.
     pub fn new<T: 'static>() -> Self {
         AllocMarker::Type(TypeId::of::<T>())
-    }
-}
-
-impl Default for AllocMarker {
-    fn default() -> Self {
-        AllocMarker::None
-    }
-}
-
-impl From<u64> for AllocMarker {
-    fn from(v: u64) -> Self {
-        AllocMarker::from_u64(v)
     }
 }
 

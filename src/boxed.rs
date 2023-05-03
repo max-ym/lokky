@@ -4,15 +4,15 @@ use core::cmp::Ordering;
 use core::hash::Hasher;
 use core::{fmt, hash, iter};
 
-pub struct Box<T: ?Sized>(pub(crate) ScopeAccess<T>);
+pub struct Box<T: ?Sized>(pub(crate) ScopePtr<T>);
 
 impl<T: 'static> Box<T> {
     pub fn new(x: T) -> Self {
-        Box(ScopeAccess::alloc(x, AllocSelector::new::<T>()).unwrap())
+        Box(ScopePtr::alloc(x, AllocSelector::new::<T>()).unwrap())
     }
 
     pub fn new_with(x: T, marker: AllocMarker) -> Self {
-        Box(ScopeAccess::alloc(x, AllocSelector::with_marker::<T>(marker)).unwrap())
+        Box(ScopePtr::alloc(x, AllocSelector::with_marker::<T>(marker)).unwrap())
     }
 
     pub fn into_inner(self) -> T {
@@ -32,37 +32,37 @@ impl Box<dyn core::any::Any + 'static> {
 
 impl<T: ?Sized> AsMut<T> for Box<T> {
     fn as_mut(&mut self) -> &mut T {
-        self.0.access_mut()
+        &mut self.0
     }
 }
 
 impl<T: ?Sized> AsRef<T> for Box<T> {
     fn as_ref(&self) -> &T {
-        self.0.access()
+        &self.0
     }
 }
 
 impl<T> core::borrow::Borrow<T> for Box<T> {
     fn borrow(&self) -> &T {
-        self.0.access()
+        &self.0
     }
 }
 
 impl<T> core::borrow::BorrowMut<T> for Box<T> {
     fn borrow_mut(&mut self) -> &mut T {
-        self.0.access_mut()
+        &mut self.0
     }
 }
 
 impl<T: fmt::Debug + ?Sized> fmt::Debug for Box<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.0.access().fmt(f)
+        self.0.fmt(f)
     }
 }
 
 impl<T: fmt::Display + ?Sized> fmt::Display for Box<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.0.access().fmt(f)
+        self.0.fmt(f)
     }
 }
 
@@ -70,13 +70,13 @@ impl<T: ?Sized> core::ops::Deref for Box<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.0.access()
+        &self.0
     }
 }
 
 impl<T: ?Sized> core::ops::DerefMut for Box<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.access_mut()
+        &mut self.0
     }
 }
 

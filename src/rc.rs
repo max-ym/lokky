@@ -54,17 +54,17 @@ impl<T: ?Sized> RcBox<T> {
     }
 }
 
-pub struct Rc<T: ?Sized>(ManuallyDrop<ScopeAccess<RcBox<T>>>);
+pub struct Rc<T: ?Sized>(ManuallyDrop<ScopePtr<RcBox<T>>>);
 
 impl<T: ?Sized> Rc<T> {
     /// Access inner `RcBox`.
     fn inner(&self) -> &RcBox<T> {
-        self.0.access()
+        &self.0
     }
 
     /// Mutable access to inner `RcBox`.
     fn inner_mut(&mut self) -> &mut RcBox<T> {
-        self.0.access_mut()
+        &mut self.0
     }
 
     pub fn as_ptr(this: &Rc<T>) -> *const T {
@@ -114,13 +114,13 @@ impl<T: 'static> Rc<T> {
             val: val.into(),
         };
         Rc(ManuallyDrop::new(
-            ScopeAccess::alloc(b, AllocSelector::new::<T>()).unwrap(),
+            ScopePtr::alloc(b, AllocSelector::new::<T>()).unwrap(),
         ))
     }
 
     pub fn try_unwrap(this: Rc<T>) -> Result<T, Self> {
         if Rc::strong_count(&this) == 1 {
-            let val = unsafe { ptr::read(&this.0.access().val) };
+            let val = unsafe { ptr::read(&this.0.val) };
             Ok(unsafe { MaybeDropped::into_inner(val) })
         } else {
             Err(this)
@@ -246,7 +246,7 @@ impl<T: PartialOrd + Ord + ?Sized> Ord for Rc<T> {
     }
 }
 
-pub struct Weak<T: ?Sized>(Option<ManuallyDrop<ScopeAccess<RcBox<T>>>>);
+pub struct Weak<T: ?Sized>(Option<ManuallyDrop<ScopePtr<RcBox<T>>>>);
 
 impl<T: ?Sized> Weak<T> {
     pub fn new() -> Self {
@@ -255,7 +255,7 @@ impl<T: ?Sized> Weak<T> {
 
     fn inner(&self) -> Option<&RcBox<T>> {
         if let Some(v) = &self.0 {
-            Some(v.access())
+            Some(v)
         } else {
             None
         }

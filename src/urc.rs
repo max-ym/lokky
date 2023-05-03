@@ -19,7 +19,7 @@ use core::ptr::drop_in_place;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use core::any::Any;
-use crate::{Access, AccessMut, AllocError, ScopeAccess};
+use crate::{AllocError, ScopePtr};
 use crate::arc::AtomicCounter;
 use crate::marker::{MaybeDropped, Scoped, UnsafeFrom, UnsafeInto};
 use crate::scope::AllocSelector;
@@ -35,7 +35,7 @@ use crate::scope::AllocSelector;
 pub struct Fence<T: ?Sized> {
     strong: Cell<usize>,
     weak: Cell<usize>,
-    master: ManuallyDrop<ScopeAccess<Master<T>>>,
+    master: ManuallyDrop<ScopePtr<Master<T>>>,
 }
 
 unsafe impl<T: ?Sized> Send for Fence<T> {}
@@ -93,7 +93,7 @@ impl<T> Fence<T> {
     pub fn into_urc(self) -> Urc<T> {
         use crate::boxed::Box;
 
-        let data = unsafe { Scoped::unsafe_from(&self.master.access().data).unsafe_into() };
+        let data = unsafe { Scoped::unsafe_from(&self.master.data).unsafe_into() };
         Urc {
             fence: ManuallyDrop::new(Box::new(self).0),
             data,
@@ -115,7 +115,7 @@ struct Master<T: ?Sized> {
 
 pub struct Urc<T: ?Sized + 'static> {
     /// A fence of this Urc.
-    fence: ManuallyDrop<ScopeAccess<Fence<T>>>,
+    fence: ManuallyDrop<ScopePtr<Fence<T>>>,
 
     /// Data reference shortcut to prevent multiple dereferences and speed up access.
     data: Scoped<T>,
@@ -130,17 +130,17 @@ pub struct Weak<T: ?Sized + 'static> {
 
 impl<T: ?Sized> Urc<T> {
     pub fn fence_of(urc: &Self) -> &Fence<T> {
-        urc.fence.access()
+        &urc.fence
     }
 
     #[inline]
     pub fn fence_weak_count(this: &Self) -> usize {
-        this.fence.access().weak_count()
+        this.fence.weak_count()
     }
 
     #[inline]
     pub fn fence_strong_count(this: &Self) -> usize {
-        this.fence.access().strong_count()
+        this.fence.strong_count()
     }
 
     /// Whether only one strong fence exists for this data.
@@ -171,30 +171,30 @@ impl<T: ?Sized> Urc<T> {
 
     #[inline(always)]
     fn master(&self) -> &Master<T> {
-        self.fence.access().master.access()
+        &self.fence.master
     }
 
     #[inline(always)]
     fn master_mut(&mut self) -> &mut Master<T> {
-        self.fence.access_mut().master.access_mut()
+        &mut self.fence.master
     }
 
     #[inline(always)]
     fn fence(&self) -> &Fence<T> {
-        self.fence.access()
+        &self.fence
     }
 
     #[inline(always)]
     fn fence_mut(&mut self) -> &mut Fence<T> {
-        self.fence.access_mut()
+        &mut self.fence
     }
 
     #[inline]
-    pub fn try_into_fence(mut this: Self) -> Result<ScopeAccess<Fence<T>>, Self> {
+    pub fn try_into_fence(mut this: Self) -> Result<ScopePtr<Fence<T>>, Self> {
         if this.fence().strong_count() == 1 && this.fence().weak_count() == 0 {
             // Take out `Fence` from old Urc and "forget" it to avoid running Drop.
             let fence = unsafe {
-                let dangling = ScopeAccess::dangling_in(&this.fence);
+                let dangling = ScopePtr::dangling_in(&this.fence);
                 mem::replace(
                     &mut this.fence, ManuallyDrop::new(dangling)
                 )
@@ -224,13 +224,13 @@ impl<T: 'static> Urc<T> {
         let fence = Fence {
             strong: 1.into(),
             weak: 0.into(),
-            master: ManuallyDrop::new(ScopeAccess::alloc(
+            master: ManuallyDrop::new(ScopePtr::alloc(
                 master,
                 AllocSelector::new::<Master<T>>(),
             )?),
         };
         let urc = Urc {
-            fence: ManuallyDrop::new(ScopeAccess::alloc(fence, AllocSelector::new::<T>())?),
+            fence: ManuallyDrop::new(ScopePtr::alloc(fence, AllocSelector::new::<T>())?),
             data,
         };
 
@@ -282,11 +282,11 @@ impl<T> Urc<T> {
 
             // If nothing refers to the Fence no more then release it.
             if this.fence().weak_count() == 0 {
-                let master: &mut ManuallyDrop<ScopeAccess<Master<T>>> =
+                let master: &mut ManuallyDrop<ScopePtr<Master<T>>> =
                     &mut *(&mut this.fence_mut().master as *mut _);
                 ManuallyDrop::drop(&mut this.fence);
                 // If nothing refers to the master no more then release it.
-                if master.access().weak_fence.load(Acquire) == 0 {
+                if master.weak_fence.load(Acquire) == 0 {
                     ManuallyDrop::drop(&mut *master);
                 }
             }
@@ -371,6 +371,8 @@ impl<T> Urc<T> {
         }
     }
 
+    /// # Safety
+    /// There can be multiple mutable accesses, which may cause bad things.
     #[inline]
     pub unsafe fn get_mut_unchecked(this: &mut Self) -> &mut T {
         // Accessing the master here since `data` is not mutable.
@@ -427,7 +429,7 @@ impl Urc<dyn Any + Send + Sync> {
         if (*self).is::<T>() {
             unsafe {
                 let fence = ManuallyDrop::new(self.fence.clone().cast::<Fence<T>>());
-                let data = Scoped::unsafe_from(&fence.access().master.access().data).unsafe_into();
+                let data = Scoped::unsafe_from(&fence.master.data).unsafe_into();
                 mem::forget(self);
                 Ok(Urc { fence, data })
             }
@@ -477,7 +479,7 @@ impl<T: ?Sized> Deref for Urc<T> {
 
 impl<T: ?Sized> core::borrow::Borrow<T> for Urc<T> {
     fn borrow(&self) -> &T {
-        &**self
+        self
     }
 }
 

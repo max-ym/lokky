@@ -18,7 +18,7 @@ use crate::{
 };
 
 pub struct Vec<T: 'static> {
-    ptr: ManuallyDrop<ScopeAccess<[T]>>,
+    ptr: ManuallyDrop<ScopePtr<[T]>>,
     len: usize,
 }
 
@@ -49,7 +49,7 @@ impl<T: 'static> Vec<T> {
         //
         // Note: we cannot create dangling ScopeAccess to unsized items yet, so no [T] here
         // but we can cast later to ScopeAccess<[T]>.
-        let ptr = unsafe { ScopeAccess::<T>::dangling(alloc, Default::default()) };
+        let ptr = unsafe { ScopePtr::<T>::dangling(alloc, Default::default()) };
         Vec {
             ptr: unsafe { ManuallyDrop::new(ptr.cast_to_slice(0)) },
             len: 0,
@@ -85,7 +85,7 @@ impl<T: 'static> Vec<T> {
                 capacity
             );
             let selector = AllocSelector::with_marker::<T>(marker);
-            let ptr = ManuallyDrop::new(ScopeAccess::alloc_array_uninit(capacity, selector)?);
+            let ptr = ManuallyDrop::new(ScopePtr::alloc_array_uninit(capacity, selector)?);
             Ok(Vec { ptr, len: 0 })
         }
     }
@@ -100,7 +100,7 @@ impl<T: 'static> Vec<T> {
         if size_of::<T>() == 0 {
             usize::MAX
         } else {
-            self.ptr.access().len()
+            self.ptr.len()
         }
     }
 
@@ -135,13 +135,13 @@ impl<T: 'static> Vec<T> {
 
     #[inline]
     pub fn as_slice(&self) -> &[T] {
-        let ptr = self.ptr.access().as_ptr();
+        let ptr = self.ptr.as_ptr();
         unsafe { slice::from_raw_parts(ptr, self.len) }
     }
 
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        let ptr = self.ptr.access_mut().as_mut_ptr();
+        let ptr = self.ptr.as_mut_ptr();
         unsafe { slice::from_raw_parts_mut(ptr, self.len) }
     }
 
@@ -1006,7 +1006,7 @@ impl<T, const N: usize> From<[T; N]> for Vec<T> {
 
 impl<T> From<Box<[T]>> for Vec<T> {
     fn from(boxed: Box<[T]>) -> Self {
-        let len = boxed.0.access().len();
+        let len = boxed.0.len();
         Vec {
             ptr: ManuallyDrop::new(boxed.0),
             len,

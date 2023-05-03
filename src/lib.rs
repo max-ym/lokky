@@ -5,8 +5,8 @@ extern crate std;
 
 mod test_log;
 
-mod access;
-pub use access::*;
+mod ptr;
+pub use ptr::*;
 
 pub mod scope;
 

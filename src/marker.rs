@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::ScopeAccess;
+use crate::ScopePtr;
 use core::mem::ManuallyDrop;
 
 /// Marker to indicate value that should be alive for current scope in which it is used.
@@ -21,10 +21,12 @@ pub type ScopedMut<T> = ExpectSurviveMut<T>;
 #[repr(transparent)]
 pub struct MaybeDropped<T: ?Sized>(ManuallyDrop<T>);
 
+#[allow(clippy::needless_lifetimes)]
 pub unsafe fn impose_lifetime<'new, 'old, T: ?Sized>(t: &'old T) -> &'new T {
     &*(t as *const T)
 }
 
+#[allow(clippy::needless_lifetimes)]
 pub unsafe fn impose_lifetime_mut<'new, 'old, T: ?Sized>(t: &'old mut T) -> &'new mut T {
     &mut *(t as *mut T)
 }
@@ -185,7 +187,7 @@ impl<T> UnsafeFrom<ExpectSurviveMut<MaybeDropped<T>>> for ExpectSurviveMut<T> {
 }
 
 pub(crate) fn clone_scope_access<T: ?Sized>(
-    access: &ManuallyDrop<ScopeAccess<T>>,
-) -> ManuallyDrop<ScopeAccess<T>> {
+    access: &ManuallyDrop<ScopePtr<T>>,
+) -> ManuallyDrop<ScopePtr<T>> {
     unsafe { ManuallyDrop::new((*access).clone()) }
 }

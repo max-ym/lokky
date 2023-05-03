@@ -1,5 +1,5 @@
 use crate::{
-    marker::MaybeDropped, scope::AllocSelector, Access, AccessMut, AllocError, ScopeAccess,
+    marker::MaybeDropped, scope::AllocSelector, AllocError, ScopePtr,
 };
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
 use core::{
@@ -25,12 +25,12 @@ struct ArcInner<T: ?Sized> {
 unsafe impl<T: ?Sized + Sync + Send> Send for ArcInner<T> {}
 unsafe impl<T: ?Sized + Sync + Send> Sync for ArcInner<T> {}
 
-pub struct Arc<T: ?Sized>(ManuallyDrop<ScopeAccess<ArcInner<T>>>);
+pub struct Arc<T: ?Sized>(ManuallyDrop<ScopePtr<ArcInner<T>>>);
 
 unsafe impl<T: ?Sized + Sync + Send> Send for Arc<T> {}
 unsafe impl<T: ?Sized + Sync + Send> Sync for Arc<T> {}
 
-pub struct Weak<T: ?Sized>(ManuallyDrop<ScopeAccess<ArcInner<T>>>);
+pub struct Weak<T: ?Sized>(ManuallyDrop<ScopePtr<ArcInner<T>>>);
 
 unsafe impl<T: ?Sized + Sync + Send> Send for Weak<T> {}
 unsafe impl<T: ?Sized + Sync + Send> Sync for Weak<T> {}
@@ -143,7 +143,7 @@ impl<T: 'static> Arc<T> {
             weak: AtomicUsize::new(0),
             data: data.into(),
         };
-        Ok(Arc(ManuallyDrop::new(ScopeAccess::alloc(
+        Ok(Arc(ManuallyDrop::new(ScopePtr::alloc(
             inner,
             AllocSelector::new::<T>(),
         )?)))
@@ -234,7 +234,7 @@ impl<T> Arc<T> {
 
         unsafe {
             // Move out the data.
-            let elem = ptr::read(MaybeDropped::as_ref(&this.0.access().data));
+            let elem = ptr::read(MaybeDropped::as_ref(&this.0.data));
 
             // If nothing refers to the ArcInner no more then release it.
             if this.inner().weak.load(Acquire) == 0 {
@@ -284,9 +284,13 @@ impl<T: ?Sized> Arc<T> {
         Arc::as_ptr(this) == Arc::as_ptr(other)
     }
 
+    /// # Safety
+    /// This function is unsafe because improper use may lead to memory problems.
+    /// For example, two threads can acquire mutable references to the same value
+    /// at the same time.
     #[inline]
     pub unsafe fn get_mut_unchecked(this: &mut Self) -> &mut T {
-        MaybeDropped::as_mut(&mut this.0.access_mut().data)
+        MaybeDropped::as_mut(&mut this.0.data)
     }
 
     pub fn get_mut(this: &mut Self) -> Option<&mut T> {
@@ -337,7 +341,7 @@ impl<T: ?Sized> Arc<T> {
 
     #[inline]
     fn inner(&self) -> &ArcInner<T> {
-        self.0.access()
+        &self.0
     }
 
     // Non-inlined part of `drop`.
@@ -375,19 +379,19 @@ impl<T: ?Sized> ops::Deref for Arc<T> {
 
     fn deref(&self) -> &Self::Target {
         // SAFETY: Arc holds a strong reference and so the data must be alive here.
-        unsafe { MaybeDropped::as_ref(&self.0.access().data) }
+        unsafe { MaybeDropped::as_ref(&self.0.data) }
     }
 }
 
 impl<T: ?Sized> AsRef<T> for Arc<T> {
     fn as_ref(&self) -> &T {
-        &**self
+        self
     }
 }
 
 impl<T: ?Sized> core::borrow::Borrow<T> for Arc<T> {
     fn borrow(&self) -> &T {
-        &**self
+        self
     }
 }
 
