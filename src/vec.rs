@@ -1271,16 +1271,16 @@ mod test {
     fn reserve() {
         init();
         let mut vec = Vec::<usize>::new();
-        vec.reserve_exact(4);
+        vec.reserve(4);
         assert!(vec.capacity() >= 4);
     }
 
     #[test]
-    fn reserve_too_small() {
+    fn reserve_exact_small() {
         init();
         let mut vec = Vec::<u8>::new();
         vec.reserve_exact(1);
-        assert!(vec.capacity() > 1);
+        assert_eq!(vec.capacity(), 1);
     }
 
     #[test]
