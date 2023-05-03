@@ -5,7 +5,7 @@ use core::iter::FusedIterator;
 use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut, Index, IndexMut, RangeBounds};
 use core::ptr::{self, drop_in_place};
-use core::ptr::{copy, copy_nonoverlapping};
+use core::ptr::copy_nonoverlapping;
 use core::slice;
 
 use crate::boxed::Box;
@@ -220,7 +220,7 @@ impl<T: 'static, const N: usize> StackVec<T, N> {
 
         // Move elements to fill read-out gap.
         let count = self.len() - index;
-        copy(
+        ptr::copy(
             self.as_ptr().add(index + 1),
             self.as_mut_ptr().add(index),
             count,
