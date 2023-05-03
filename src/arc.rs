@@ -1,6 +1,4 @@
-use crate::{
-    marker::MaybeDropped, scope::AllocSelector, AllocError, ScopePtr,
-};
+use crate::{marker::MaybeDropped, scope::AllocSelector, AllocError, ScopePtr};
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
 use core::{
     any::Any,

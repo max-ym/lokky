@@ -1,5 +1,5 @@
-use core::{char::decode_utf16, convert::Infallible, mem::MaybeUninit, ptr, str::Utf8Error};
 use core::slice;
+use core::{char::decode_utf16, convert::Infallible, mem::MaybeUninit, ptr, str::Utf8Error};
 
 use crate::{
     scope::AllocMarker,
@@ -246,8 +246,8 @@ impl String {
 
     #[inline]
     pub fn retain<F>(&mut self, mut f: F)
-        where
-            F: FnMut(char) -> bool,
+    where
+        F: FnMut(char) -> bool,
     {
         struct SetLenOnDrop<'a> {
             s: &'a mut String,
@@ -264,7 +264,11 @@ impl String {
         }
 
         let len = self.len();
-        let mut guard = SetLenOnDrop { s: self, idx: 0, del_bytes: 0 };
+        let mut guard = SetLenOnDrop {
+            s: self,
+            idx: 0,
+            del_bytes: 0,
+        };
 
         while guard.idx < len {
             let ch =

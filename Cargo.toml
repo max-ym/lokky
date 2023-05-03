@@ -9,8 +9,8 @@ edition = "2021"
 no_std = []
 
 [dev-dependencies]
-jemallocator = "0.3"
+jemallocator = "0.5"
 log = "0.4"
-simplelog = "0.11"
+simplelog = "0.12"
 
 [dependencies]

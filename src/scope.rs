@@ -17,7 +17,8 @@ pub struct Env {
 #[derive(Default, Copy, Clone, Eq, PartialEq, Debug, Hash)]
 pub enum AllocMarker {
     /// No marker used.
-    #[default] None,
+    #[default]
+    None,
 
     /// Type-based marker. It is expected to use unit structures, for example,
     /// MonsterMarker or NpcMarker.

@@ -10,7 +10,11 @@
 //! if it is referred to by more than one thread since one thread does not have any means to
 //! synchronize such data with each another.
 
-use core::{fmt, mem, ptr};
+use crate::arc::AtomicCounter;
+use crate::marker::{MaybeDropped, Scoped, UnsafeFrom, UnsafeInto};
+use crate::scope::AllocSelector;
+use crate::{AllocError, ScopePtr};
+use core::any::Any;
 use core::cell::Cell;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::Deref;
@@ -18,11 +22,7 @@ use core::pin::Pin;
 use core::ptr::drop_in_place;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-use core::any::Any;
-use crate::{AllocError, ScopePtr};
-use crate::arc::AtomicCounter;
-use crate::marker::{MaybeDropped, Scoped, UnsafeFrom, UnsafeInto};
-use crate::scope::AllocSelector;
+use core::{fmt, mem, ptr};
 
 /// `Fence` allows to share the data behind `Urc` between threads.
 /// Each `Urc` in a single thread points to it's corresponding `Fence`.
@@ -195,9 +195,7 @@ impl<T: ?Sized> Urc<T> {
             // Take out `Fence` from old Urc and "forget" it to avoid running Drop.
             let fence = unsafe {
                 let dangling = ScopePtr::dangling_in(&this.fence);
-                mem::replace(
-                    &mut this.fence, ManuallyDrop::new(dangling)
-                )
+                mem::replace(&mut this.fence, ManuallyDrop::new(dangling))
             };
             mem::forget(this);
             Ok(ManuallyDrop::into_inner(fence))
@@ -224,10 +222,7 @@ impl<T: 'static> Urc<T> {
         let fence = Fence {
             strong: 1.into(),
             weak: 0.into(),
-            master: ManuallyDrop::new(ScopePtr::alloc(
-                master,
-                AllocSelector::new::<Master<T>>(),
-            )?),
+            master: ManuallyDrop::new(ScopePtr::alloc(master, AllocSelector::new::<Master<T>>())?),
         };
         let urc = Urc {
             fence: ManuallyDrop::new(ScopePtr::alloc(fence, AllocSelector::new::<T>())?),
@@ -299,8 +294,8 @@ impl<T> Urc<T> {
     }
 
     pub fn make_mut(this: &mut Self) -> &mut T
-        where
-            T: Clone,
+    where
+        T: Clone,
     {
         // Clone the data into new Urc.
         macro_rules! clone(
@@ -359,10 +354,12 @@ impl<T> Urc<T> {
 
                 let mut weak_fence = AtomicCounter::new(&this.master().weak_fence, Acquire);
                 weak_fence.increment(Release);
-                let _ = unsafe { Weak {
-                    fence: Scoped::unsafe_from(this.fence()),
-                    master: Scoped::unsafe_from(this.master()),
-                }};
+                let _ = unsafe {
+                    Weak {
+                        fence: Scoped::unsafe_from(this.fence()),
+                        master: Scoped::unsafe_from(this.master()),
+                    }
+                };
 
                 move_out!()
             }
@@ -423,8 +420,8 @@ impl<T> Urc<T> {
 impl Urc<dyn Any + Send + Sync> {
     #[inline]
     pub fn downcast<T>(self) -> Result<Urc<T>, Self>
-        where
-            T: Any + Send + Sync,
+    where
+        T: Any + Send + Sync,
     {
         if (*self).is::<T>() {
             unsafe {

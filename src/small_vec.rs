@@ -4,8 +4,8 @@ use core::hash::Hash;
 use core::iter::FusedIterator;
 use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut, Index, IndexMut, RangeBounds};
-use core::ptr::{copy, copy_nonoverlapping};
 use core::ptr::{self, drop_in_place};
+use core::ptr::{copy, copy_nonoverlapping};
 use core::slice;
 
 use crate::boxed::Box;
@@ -33,7 +33,7 @@ struct StackVec<T: 'static, const N: usize> {
     len: usize,
 }
 
-// Allows to redirect call to either stack or heap based function depending on 
+// Allows to redirect call to either stack or heap based function depending on
 // current storage type.
 macro_rules! redirect_fn {
     ($v:vis fn $f:ident (&self $(,$var:ident : $var_ty:ty)*) $(-> $t:ty)?) => {
@@ -196,7 +196,11 @@ impl<T: 'static, const N: usize> StackVec<T, N> {
 
         // Move elements to fill read-out gap.
         let count = self.len() - index;
-        copy(self.as_ptr().add(index + 1), self.as_mut_ptr().add(index), count);
+        copy(
+            self.as_ptr().add(index + 1),
+            self.as_mut_ptr().add(index),
+            count,
+        );
 
         self.set_len(self.len() - 1);
 
@@ -414,8 +418,7 @@ impl<T: 'static, const N: usize> SmallVec<T, N> {
             Stack(vec) => {
                 let old_vec = vec;
                 let reserve = usize::max(old_vec.len() + additional, Vec::<T>::MIN_NON_ZERO_CAP);
-                let mut new_vec =
-                    Vec::try_with_capacity_and_marker(reserve, self.marker)?;
+                let mut new_vec = Vec::try_with_capacity_and_marker(reserve, self.marker)?;
 
                 unsafe {
                     let read = old_vec.as_slice();
@@ -969,7 +972,7 @@ mod test {
         let vec = SmallVec::<usize, 10>::with_capacity(11);
         assert!(vec.capacity() >= 11);
     }
-    
+
     #[test]
     fn push() {
         init();
@@ -979,7 +982,7 @@ mod test {
         vec.push(3);
         assert_eq!(vec.as_slice(), [1, 2, 3]);
     }
-    
+
     #[test]
     fn push_heap() {
         init();
@@ -1005,7 +1008,7 @@ mod test {
         vec.pop();
         assert!(vec.is_empty());
     }
-    
+
     #[test]
     fn reserve() {
         init();

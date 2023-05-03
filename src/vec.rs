@@ -28,9 +28,9 @@ impl<T: 'static> Vec<T> {
     //   to round up a request of less than 8 bytes to at least 8 bytes.
     // - 4 if elements are moderate-sized (<= 1 KiB).
     // - 1 otherwise, to avoid wasting too much space for very short Vecs.
-    pub(crate) const MIN_NON_ZERO_CAP: usize = if core::mem::size_of::<T>() == 1 {
+    pub(crate) const MIN_NON_ZERO_CAP: usize = if size_of::<T>() == 1 {
         8
-    } else if core::mem::size_of::<T>() <= 1024 {
+    } else if size_of::<T>() <= 1024 {
         4
     } else {
         1
@@ -1018,7 +1018,10 @@ impl From<Box<str>> for Vec<u8> {
     fn from(bx: Box<str>) -> Self {
         let len = bx.len();
         let bx: Box<[u8]> = bx.into();
-        Vec { ptr: ManuallyDrop::new(bx.0), len }
+        Vec {
+            ptr: ManuallyDrop::new(bx.0),
+            len,
+        }
     }
 }
 

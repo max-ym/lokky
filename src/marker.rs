@@ -176,13 +176,13 @@ impl<T> UnsafeFrom<MaybeDropped<T>> for T {
 
 impl<T> UnsafeFrom<ExpectSurvive<MaybeDropped<T>>> for ExpectSurvive<T> {
     unsafe fn unsafe_from(value: ExpectSurvive<MaybeDropped<T>>) -> Self {
-        ExpectSurvive(&value.0.0)
+        ExpectSurvive(&value.0 .0)
     }
 }
 
 impl<T> UnsafeFrom<ExpectSurviveMut<MaybeDropped<T>>> for ExpectSurviveMut<T> {
     unsafe fn unsafe_from(value: ExpectSurviveMut<MaybeDropped<T>>) -> Self {
-        ExpectSurviveMut(&mut value.0.0)
+        ExpectSurviveMut(&mut value.0 .0)
     }
 }
 

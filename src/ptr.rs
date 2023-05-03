@@ -4,9 +4,9 @@ use crate::trace;
 use core::alloc::{GlobalAlloc, Layout};
 use core::marker::PhantomData;
 use core::mem::{self, size_of, transmute};
+use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 use core::{ptr, slice};
-use core::ops::{Deref, DerefMut};
 
 /// The pointer that is guaranteed to be valid in some scope.
 pub struct ScopePtr<T: ?Sized> {
