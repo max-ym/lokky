@@ -66,6 +66,16 @@ macro_rules! redirect_fn {
             }
         }
     };
+    ($v:vis unsafe fn $f:ident (&self $(,$var:ident : $var_ty:ty)*) $(-> $t:ty)?) => {
+        #[inline]
+        $v unsafe fn $f(&self $(,$var : $var_ty)*) $(-> $t)? {
+            use Storage::*;
+            match &self.storage {
+                Stack(vec) => vec.$f($($var),*),
+                Heap(vec) => vec.$f($($var),*),
+            }
+        }
+    };
 
     ($v:vis fn $f:ident (&mut self $(,$var:ident : $var_ty:ty)*) $(-> $t:ty)?; $($tt:tt)*) => {
         redirect_fn!($v fn $f (&mut self $(,$var : $var_ty)*) $(-> $t)?);
@@ -121,14 +131,24 @@ impl<T: 'static, const N: usize> StackVec<T, N> {
 
     #[inline]
     pub fn as_slice(&self) -> &[T] {
+        unsafe { self.as_slice_with_len(self.len()) }
+    }
+
+    #[inline]
+    fn as_slice_with_len_mut(&mut self, len: usize) -> &mut [T] {
+        let ptr = self.slice.as_mut_ptr() as *mut T;
+        unsafe { slice::from_raw_parts_mut(ptr, len) }
+    }
+
+    #[inline]
+    fn as_slice_with_len(&self, len: usize) -> &[T] {
         let ptr = self.slice.as_ptr() as *const T;
-        unsafe { slice::from_raw_parts(ptr, self.len()) }
+        unsafe { slice::from_raw_parts(ptr, len) }
     }
 
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        let ptr = self.slice.as_mut_ptr() as *mut T;
-        unsafe { slice::from_raw_parts_mut(ptr, self.len()) }
+        self.as_slice_with_len_mut(self.len())
     }
 
     pub fn clear(&mut self) {
@@ -150,8 +170,12 @@ impl<T: 'static, const N: usize> StackVec<T, N> {
         assert!(!self.is_full());
 
         let index = self.len();
-        let write = self.get_unchecked_mut(index);
-        ptr::write(write, value);
+
+        // SAFETY: we just asserted that the index is in bounds.
+        let extended_slice = slice::from_raw_parts_mut(self.slice.as_mut_ptr(), index + 1);
+        let new_elem_place = extended_slice.get_unchecked_mut(index);
+
+        new_elem_place.write(value);
         self.set_len(self.len() + 1);
     }
 
@@ -333,6 +357,8 @@ impl<T: 'static, const N: usize> SmallVec<T, N> {
         pub fn capacity(&self) -> usize;
         pub fn len(&self) -> usize;
         unsafe fn set_len(&mut self, len: usize);
+        unsafe fn as_slice_with_len_mut(&mut self, len: usize) -> &mut [T];
+        unsafe fn as_slice_with_len(&self, len: usize) -> &[T];
         pub fn clear(&mut self);
         pub fn is_full(&self) -> bool;
         pub fn is_empty(&self) -> bool;
@@ -622,6 +648,16 @@ impl<T: 'static, const N: usize> Vecx<T> for SmallVec<T, N> {
     }
 
     #[inline(always)]
+    unsafe fn as_slice_with_len_mut(&mut self, len: usize) -> &mut [T] {
+        self.as_slice_with_len_mut(len)
+    }
+
+    #[inline(always)]
+    unsafe fn as_slice_with_len(&self, len: usize) -> &[T] {
+        self.as_slice_with_len(len)
+    }
+
+    #[inline(always)]
     fn len(&self) -> usize {
         self.len()
     }
@@ -732,6 +768,16 @@ impl<T: 'static, const N: usize> Vecx<T> for StackVec<T, N> {
     #[inline(always)]
     unsafe fn set_len(&mut self, len: usize) {
         self.set_len(len)
+    }
+
+    #[inline(always)]
+    unsafe fn as_slice_with_len_mut(&mut self, len: usize) -> &mut [T] {
+        self.as_slice_with_len_mut(len)
+    }
+
+    #[inline(always)]
+    unsafe fn as_slice_with_len(&self, len: usize) -> &[T] {
+        self.as_slice_with_len(len)
     }
 
     #[inline(always)]

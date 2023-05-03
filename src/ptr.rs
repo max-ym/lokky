@@ -1,6 +1,6 @@
 use crate::marker::Scoped;
 use crate::scope::{AllocMarker, AllocSelector};
-use crate::trace;
+use crate::test_log::trace;
 use core::alloc::{GlobalAlloc, Layout};
 use core::marker::PhantomData;
 use core::mem::{self, size_of, transmute};

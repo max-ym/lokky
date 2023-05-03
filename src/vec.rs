@@ -10,11 +10,11 @@ use core::{
 };
 
 use super::*;
+use crate::test_log::trace;
 use crate::{
     boxed::Box,
     marker::impose_lifetime_mut,
     scope::{AllocMarker, AllocSelector},
-    trace,
 };
 
 pub struct Vec<T: 'static> {
@@ -134,15 +134,25 @@ impl<T: 'static> Vec<T> {
     }
 
     #[inline]
-    pub fn as_slice(&self) -> &[T] {
+    unsafe fn as_slice_with_len_mut(&mut self, len: usize) -> &mut [T] {
+        let ptr = self.ptr.as_mut_ptr();
+        slice::from_raw_parts_mut(ptr, len)
+    }
+
+    #[inline]
+    unsafe fn as_slice_with_len(&self, len: usize) -> &[T] {
         let ptr = self.ptr.as_ptr();
-        unsafe { slice::from_raw_parts(ptr, self.len) }
+        slice::from_raw_parts(ptr, len)
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[T] {
+        unsafe { self.as_slice_with_len(self.len) }
     }
 
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        let ptr = self.ptr.as_mut_ptr();
-        unsafe { slice::from_raw_parts_mut(ptr, self.len) }
+        unsafe { self.as_slice_with_len_mut(self.len) }
     }
 
     #[inline]
@@ -423,7 +433,9 @@ impl<T: 'static> Vec<T> {
         }
 
         unsafe {
-            let insert_ptr: *mut T = self.get_unchecked_mut(index);
+            let insert_ptr: *mut T = self
+                .as_slice_with_len_mut(self.len() + 1)
+                .get_unchecked_mut(index);
             // Shift everything over to make space. (Duplicating the
             // `index`th element into two consecutive places.)
             ptr::copy(insert_ptr, insert_ptr.add(1), self.len() - index);
@@ -712,11 +724,11 @@ impl<'a, T: 'static> RetainIter<'a, T> {
         debug_assert!(!vec.is_empty());
 
         let initial_len = vec.len();
-        // Set len to 0 in case drop panics so that invalid elements could not be
-        // accessed. Len will increase gradually as new elements gets processed.
-        unsafe { vec.set_len(0) };
         if discard_first {
-            unsafe { drop_in_place(vec.get_unchecked_mut(0)) };
+            // Set len to 0 in case drop panics so that invalid elements could not be
+            // accessed. Len will increase gradually as new elements gets processed.
+            unsafe { vec.set_len(0) };
+            unsafe { drop_in_place(vec.as_slice_with_len_mut(initial_len).get_unchecked_mut(0)) };
             RetainIter {
                 write: 0,
                 read: 1,
@@ -739,11 +751,23 @@ impl<'a, T: 'static> RetainIter<'a, T> {
     }
 
     fn peek(&self) -> &T {
-        unsafe { self.vec.get_unchecked(self.read) }
+        unsafe { self.get_unchecked(self.read) }
     }
 
     fn peek_mut(&mut self) -> &mut T {
-        unsafe { self.vec.get_unchecked_mut(self.read) }
+        unsafe { self.get_unchecked_mut(self.read) }
+    }
+
+    unsafe fn get_unchecked(&self, index: usize) -> &T {
+        self.vec
+            .as_slice_with_len(self.initial_len)
+            .get_unchecked(index)
+    }
+
+    unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
+        self.vec
+            .as_slice_with_len_mut(self.initial_len)
+            .get_unchecked_mut(index)
     }
 
     /// Copy current read element from `read` to `write`.
@@ -754,8 +778,8 @@ impl<'a, T: 'static> RetainIter<'a, T> {
     unsafe fn copy(&mut self) {
         debug_assert_ne!(self.read, self.write);
 
-        let read: *const T = self.vec.get_unchecked(self.read);
-        let write: *mut T = self.vec.get_unchecked_mut(self.write);
+        let read: *const T = self.get_unchecked(self.read);
+        let write: *mut T = self.get_unchecked_mut(self.write);
         ptr::copy_nonoverlapping(read, write, 1);
     }
 
@@ -778,7 +802,7 @@ impl<'a, T: 'static> RetainIter<'a, T> {
 
     /// Drop read element and move to next.
     fn discard_next(&mut self) {
-        unsafe { drop_in_place(self.vec.get_unchecked_mut(self.read)) };
+        unsafe { drop_in_place(self.get_unchecked_mut(self.read)) };
         self.read += 1;
     }
 
@@ -1087,13 +1111,15 @@ impl<T> FusedIterator for IntoIter<T> {}
 impl<T> Drop for IntoIter<T> {
     fn drop(&mut self) {
         unsafe {
+            let len = self.vec.len();
+
             // Disallow Vec to deallocate any remaining elements.
             self.vec.set_len(0);
 
             // Get elements that were not moved out of Vec.
             let unmoved_elements = slice::from_raw_parts_mut(
                 self.vec.as_mut_ptr().add(self.index),
-                self.vec.len() - self.index,
+                len - self.index,
             );
             // Drop each of elements still owned by Vec.
             for element in unmoved_elements {
@@ -1134,6 +1160,16 @@ impl<T: 'static> Vecx<T> for Vec<T> {
     }
 
     #[inline(always)]
+    unsafe fn as_slice_with_len_mut(&mut self, len: usize) -> &mut [T] {
+        self.as_slice_with_len_mut(len)
+    }
+
+    #[inline(always)]
+    unsafe fn as_slice_with_len(&self, len: usize) -> &[T] {
+        self.as_slice_with_len(len)
+    }
+
+    #[inline(always)]
     fn len(&self) -> usize {
         self.len()
     }
@@ -1161,6 +1197,8 @@ impl<T: 'static> Vecx<T> for Vec<T> {
 
 pub(crate) trait Vecx<T: 'static>: Deref<Target = [T]> + DerefMut {
     unsafe fn set_len(&mut self, len: usize);
+    unsafe fn as_slice_with_len_mut(&mut self, len: usize) -> &mut [T];
+    unsafe fn as_slice_with_len(&self, len: usize) -> &[T];
     fn len(&self) -> usize;
     fn as_slice(&self) -> &[T];
     fn truncate(&mut self, len: usize);
@@ -1187,6 +1225,7 @@ impl OverflowGuardedAdd for usize {
 mod test {
     use super::*;
     use crate::test::init;
+    use crate::test_log::info;
 
     #[test]
     fn create_vec() {
