@@ -1,5 +1,4 @@
 #[cfg(test)]
-#[macro_export(crate)]
 macro_rules! trace {
     (target: $target:expr, $($arg:tt)+) => (
         log::trace!(target: $target, $($arg)+)
@@ -10,7 +9,6 @@ macro_rules! trace {
 }
 
 #[cfg(not(test))]
-#[macro_export(crate)]
 macro_rules! trace {
     (target: $target:expr, $($arg:tt)+) => {
         // Nothing.
@@ -21,7 +19,6 @@ macro_rules! trace {
 }
 
 #[cfg(test)]
-#[macro_export(crate)]
 macro_rules! info {
     (target: $target:expr, $($arg:tt)+) => (
         log::info!(target: $target, $($arg)+)
@@ -32,7 +29,6 @@ macro_rules! info {
 }
 
 #[cfg(not(test))]
-#[macro_export(crate)]
 macro_rules! info {
     (target: $target:expr, $($arg:tt)+) => {
         // Nothing.
@@ -41,3 +37,6 @@ macro_rules! info {
         // Nothing.
     };
 }
+
+pub(crate) use info;
+pub(crate) use trace;
