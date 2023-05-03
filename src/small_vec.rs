@@ -12,9 +12,9 @@ use crate::boxed::Box;
 use crate::scope::AllocMarker;
 use crate::vec::{
     DrainInner, OverflowGuardedAdd, ResizeWith, ResizeWithFn, ResizeWithVal, RetainIter,
-    TryReserveError, Vec, Vecx,
+    TryReserveError, Vec, Vecx, impl_drain,
 };
-use crate::{impl_drain, ArrayAllocError};
+use crate::ArrayAllocError;
 
 /// The same as `Vec` but also allows storing small slices in the stack without allocating
 /// space on heap.
@@ -135,20 +135,20 @@ impl<T: 'static, const N: usize> StackVec<T, N> {
     }
 
     #[inline]
-    fn as_slice_with_len_mut(&mut self, len: usize) -> &mut [T] {
+    unsafe fn as_slice_with_len_mut(&mut self, len: usize) -> &mut [T] {
         let ptr = self.slice.as_mut_ptr() as *mut T;
-        unsafe { slice::from_raw_parts_mut(ptr, len) }
+        slice::from_raw_parts_mut(ptr, len)
     }
 
     #[inline]
-    fn as_slice_with_len(&self, len: usize) -> &[T] {
+    unsafe fn as_slice_with_len(&self, len: usize) -> &[T] {
         let ptr = self.slice.as_ptr() as *const T;
-        unsafe { slice::from_raw_parts(ptr, len) }
+        slice::from_raw_parts(ptr, len)
     }
 
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        self.as_slice_with_len_mut(self.len())
+        unsafe { self.as_slice_with_len_mut(self.len()) }
     }
 
     pub fn clear(&mut self) {

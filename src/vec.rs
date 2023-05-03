@@ -629,7 +629,6 @@ impl<'vec, T: 'static, V: Vecx<T>> ExactSizeIterator for DrainInner<'vec, T, V> 
 
 impl<'vec, T: 'static, V: Vecx<T>> FusedIterator for DrainInner<'vec, T, V> {}
 
-#[macro_export(local_inner_macro)]
 macro_rules! impl_drain {
     ($t:ty, $($gen:tt)*) => {
         impl<$($gen)*> $t {
@@ -661,6 +660,7 @@ macro_rules! impl_drain {
         impl<$($gen)*> FusedIterator for $t {}
     };
 }
+pub(crate) use impl_drain;
 impl_drain!(Drain<'vec, T>, 'vec, T: 'static);
 
 pub(crate) trait ResizeWith<T: 'static>: Sized {
