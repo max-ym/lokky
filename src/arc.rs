@@ -5,6 +5,7 @@ use core::{
     fmt, hint,
     mem::{self, ManuallyDrop, MaybeUninit},
     ops,
+    panic::{RefUnwindSafe, UnwindSafe},
     pin::Pin,
     ptr::{self, drop_in_place},
     sync::atomic::{AtomicUsize, Ordering},
@@ -458,6 +459,8 @@ impl<T: ?Sized + core::hash::Hash> core::hash::Hash for Arc<T> {
         (**self).hash(state)
     }
 }
+
+impl<T: RefUnwindSafe + ?Sized> UnwindSafe for Arc<T> {}
 
 impl<T: ?Sized + 'static> Clone for Arc<T> {
     #[inline]
