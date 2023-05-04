@@ -145,3 +145,35 @@ pub fn spawn<T, S: Scope + 'static>(
 ) -> T {
     env_mut().spawn(scope_init, f)
 }
+
+/// Envelope type that can be sent into the inner scope into the another thread.
+/// Envelope wraps up the normally un-[Send]-able types like [Vec] or [Arc] from
+/// this library, and allows to send them into the inner scope of the another thread.
+/// The value is guaranteed to be valid during the lifetime of the scope where it was
+/// originally created due to lifetime constraints declared.
+pub struct Envelope<'scope, T: 'scope> {
+    val: T,
+    _scope: PhantomData<&'scope mut T>,
+}
+
+unsafe impl<'scope, T: 'scope> Send for Envelope<'scope, T> {}
+
+/// Trait to indicate the other thread's scope that can receive [Envelope] types.
+/// The bounds in this trait are designed as such that the data is guaranteed to be valid
+/// during the lifetime of the scope where they were originally created.
+pub trait ScopeRecv<'inner> {
+    fn recv<T: 'inner>(&self, v: Envelope<'inner, T>) -> T {
+        v.val
+    }
+
+    /// Envelop the given data to be passed inside the scope to another thread.
+    fn envelop<T: 'inner>(&self, val: T) -> Envelope<'inner, T> {
+        Envelope {
+            val,
+            _scope: PhantomData,
+        }
+    }
+}
+
+#[cfg(not(feature = "no_std"))]
+impl<'env> ScopeRecv<'env> for std::thread::Scope<'_, 'env> {}

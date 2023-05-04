@@ -1010,18 +1010,22 @@ impl<T, const N: usize> From<[T; N]> for Vec<T> {
     fn from(slice: [T; N]) -> Self {
         let mut vec = Vec::new();
         let slice_ptr = slice.as_ptr();
-        let vec_ptr = vec.as_mut_ptr();
 
         unsafe {
             // Resize Vec to be able to hold new copied elements.
             vec.reserve_exact(N);
+            let vec_ptr = vec.as_mut_ptr();
+
             // Copy all data from slice to Vec.
-            ptr::copy_nonoverlapping(slice_ptr, vec_ptr, N);
-            // Set correct amount of elements.
-            vec.set_len(N);
+            copy_nonoverlapping(slice_ptr, vec_ptr, N);
+            trace!("Copy success");
+
             // Forget the slice to avoid dropping. All this effectively just moves the elements
             // to Vec.
             mem::forget(slice);
+
+            // Set correct amount of elements.
+            vec.set_len(N);
         }
 
         vec
