@@ -186,7 +186,7 @@ impl<T> ScopePtr<T> {
 
     /// Allocate memory using given `Layout` and `AllocQuery`.
     fn alloc_layout(layout: Layout, selector: AllocSelector) -> Result<Self, AllocError> {
-        let alloc = crate::scope::current().alloc_for(selector);
+        let alloc = crate::scope::current(&()).alloc_for(selector);
         trace!("alloc with {:?}", &layout);
         let mem = unsafe { alloc.alloc(layout) as *mut T };
         if let Some(ptr) = NonNull::new(mem) {

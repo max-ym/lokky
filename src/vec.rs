@@ -43,7 +43,7 @@ impl<T: 'static> Vec<T> {
 
     #[inline]
     pub fn with_marker(marker: AllocMarker) -> Self {
-        let alloc = scope::current().alloc_for(AllocSelector::with_marker::<T>(marker));
+        let alloc = scope::current(&()).alloc_for(AllocSelector::with_marker::<T>(marker));
         // SAFETY: when capacity is set to zero ptr will never be accessed and may safely
         // remain dangling.
         //

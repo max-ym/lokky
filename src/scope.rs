@@ -2,6 +2,7 @@ use crate::marker::{impose_lifetime_mut, ScopedMut, UnsafeInto};
 use core::alloc::GlobalAlloc;
 use core::any::TypeId;
 use core::mem::transmute_copy;
+use std::marker::PhantomData;
 
 /// Function to resolve Env for current application. It should be initialized before using
 /// scopes and types that rely on scope information.
@@ -109,7 +110,12 @@ impl Env {
         }
     }
 
-    pub fn current(&self) -> &'static dyn Scope {
+    /// Get current scope. The scope's lifetime is bound to the lifetime of current function
+    /// (or more exactly, to the value passed to create a bound to). The lifetime
+    /// is required so that the scope reference will not be returned outside of the
+    /// local execution, which may as well otherwise be
+    /// outside the scope that this function is returning.
+    pub fn current<'local, T>(&self, _bound: &'local T) -> &'local (dyn Scope + 'local) {
         unsafe { transmute_copy(&self.cur) }
     }
 }
@@ -124,9 +130,13 @@ fn env_mut() -> &'static mut Env {
     unsafe { ENV.unwrap()() }
 }
 
+/// Get current scope. The scope's lifetime is bound to the lifetime of current function
+/// (or more exactly, to the value passed to create a bound to). The lifetime
+/// is required so that the scope reference will not be returned outside of the
+/// local execution, which may as well be outside the scope that this function is returning.
 #[inline]
-pub fn current() -> &'static dyn Scope {
-    env().current()
+pub fn current<'local, T>(bound: &'local T) -> &'local (dyn Scope + 'local) {
+    env().current(bound)
 }
 
 pub fn spawn<T, S: Scope + 'static>(
