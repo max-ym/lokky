@@ -157,6 +157,7 @@ impl<T: ?Sized> MaybeDropped<T> {
         &this.0
     }
 
+    /// Accessing the value is not safe as it might be dropped.
     pub unsafe fn as_mut(this: &mut Self) -> &mut T {
         &mut this.0
     }

@@ -302,7 +302,7 @@ impl<T> Weak<T> {
     pub fn as_ptr(&self) -> *const T {
         if let Some(v) = self.inner() {
             // SAFETY: don't care here as we return not a reference but a pointer which will be
-            // used in unsafe code anyway.
+            // used in unsafe block anyway.
             unsafe { MaybeDropped::as_ref(&v.val) }
         } else {
             core::ptr::null()
