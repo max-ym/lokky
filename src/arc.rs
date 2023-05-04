@@ -535,3 +535,130 @@ impl<T: ?Sized> Drop for Arc<T> {
         unsafe { self.drop_slow() }
     }
 }
+
+#[cfg(all(test, not(feature = "no_std")))]
+mod tests {
+    // Many copied from:
+    // https://github.com/rust-lang/rust/blob/master/library/alloc/src/sync/tests.rs
+
+    use std::sync::mpsc::channel;
+    use std::thread;
+    use crate::scope::{ScopeRecv};
+    use crate::test::init;
+    use crate::test_log::*;
+    use super::*;
+
+    #[test]
+    fn manually_share_arc() {
+        init();
+        use crate::vec::Vec;
+
+        let v = Vec::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        let arc_v = Arc::new(v);
+        let (tx, rx) = channel();
+
+        thread::scope(|s| {
+            info!("Spawning thread");
+            let _t = s.spawn(move || {
+                let arc_v: Arc<Vec<i32>> = s.recv(rx.recv().unwrap());
+                assert_eq!((*arc_v)[3], 4);
+            });
+
+            info!("Sending Arc");
+            tx.send(s.envelop(arc_v.clone())).unwrap();
+
+            assert_eq!((*arc_v)[2], 3);
+            assert_eq!((*arc_v)[4], 5);
+        });
+    }
+
+    #[test]
+    fn test_arc_get_mut() {
+        init();
+        let mut x = Arc::new(3);
+        *Arc::get_mut(&mut x).unwrap() = 4;
+        assert_eq!(*x, 4);
+        let y = x.clone();
+        assert!(Arc::get_mut(&mut x).is_none());
+        drop(y);
+        assert!(Arc::get_mut(&mut x).is_some());
+        let _w = Arc::downgrade(&x);
+        assert!(Arc::get_mut(&mut x).is_none());
+    }
+
+    #[test]
+    fn try_unwrap() {
+        init();
+        let x = Arc::new(3);
+        assert_eq!(Arc::try_unwrap(x), Ok(3));
+        let x = Arc::new(4);
+        let _y = x.clone();
+        assert_eq!(Arc::try_unwrap(x), Err(Arc::new(4)));
+        let x = Arc::new(5);
+        let _w = Arc::downgrade(&x);
+        assert_eq!(Arc::try_unwrap(x), Ok(5));
+    }
+
+    #[test]
+    fn test_cowarc_clone_make_mut() {
+        init();
+
+        let mut cow0 = Arc::new(75);
+        let mut cow1 = cow0.clone();
+        let mut cow2 = cow1.clone();
+
+        assert_eq!(75, *Arc::make_mut(&mut cow0));
+        assert_eq!(75, *Arc::make_mut(&mut cow1));
+        assert_eq!(75, *Arc::make_mut(&mut cow2));
+
+        *Arc::make_mut(&mut cow0) += 1;
+        *Arc::make_mut(&mut cow1) += 2;
+        *Arc::make_mut(&mut cow2) += 3;
+
+        assert_eq!(76, *cow0);
+        assert_eq!(77, *cow1);
+        assert_eq!(78, *cow2);
+
+        // none should point to the same backing memory
+        assert_ne!(*cow0, *cow1);
+        assert_ne!(*cow0, *cow2);
+        assert_ne!(*cow1, *cow2);
+    }
+
+    #[test]
+    fn test_cowarc_clone_unique2() {
+        init();
+
+        let mut cow0 = Arc::new(75);
+        let cow1 = cow0.clone();
+        let cow2 = cow1.clone();
+
+        assert_eq!(75, *cow0);
+        assert_eq!(75, *cow1);
+        assert_eq!(75, *cow2);
+
+        *Arc::make_mut(&mut cow0) += 1;
+        assert_eq!(76, *cow0);
+        assert_eq!(75, *cow1);
+        assert_eq!(75, *cow2);
+
+        // cow1 and cow2 should share the same contents
+        // cow0 should have a unique reference
+        assert_ne!(*cow0, *cow1);
+        assert_ne!(*cow0, *cow2);
+        assert_eq!(*cow1, *cow2);
+    }
+
+    // Make sure deriving works with Arc<T>
+    #[derive(Eq, Ord, PartialEq, PartialOrd, Clone, Debug, Default)]
+    struct Foo {
+        inner: Arc<i32>,
+    }
+
+    #[test]
+    fn show_arc() {
+        init();
+        let a = Arc::new(5);
+        assert_eq!(std::format!("{a:?}"), "5");
+    }
+}
