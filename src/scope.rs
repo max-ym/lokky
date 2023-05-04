@@ -1,7 +1,8 @@
 use crate::marker::{impose_lifetime_mut, ScopedMut, UnsafeInto};
 use core::alloc::GlobalAlloc;
-use core::any::TypeId;
 use core::mem::transmute_copy;
+use std::any::type_name;
+use std::hash::Hash;
 use std::marker::PhantomData;
 
 /// Function to resolve Env for current application. It should be initialized before using
@@ -15,7 +16,7 @@ pub struct Env {
 
 /// Allocator Marker provides information to indicate which allocator to select for given
 /// allocation.
-#[derive(Default, Copy, Clone, Eq, PartialEq, Debug, Hash)]
+#[derive(Default, Copy, Clone, Eq, Debug)]
 pub enum AllocMarker {
     /// No marker used.
     #[default]
@@ -23,38 +24,75 @@ pub enum AllocMarker {
 
     /// Type-based marker. It is expected to use unit structures, for example,
     /// MonsterMarker or NpcMarker.
-    Type(TypeId),
+    // Note that earlier versions of this crate used `TypeId` directly as a marker. This was
+    // changed because TypeId required types to not have any references to the local
+    // values which limits usability. Though not sure how reliable this is.
+    // The strings themselves are not compared, but instead the address that they point to,
+    // as this is faster.
+    Type(&'static str),
+}
+
+impl PartialEq for AllocMarker {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (AllocMarker::None, AllocMarker::None) => true,
+            (AllocMarker::Type(a), AllocMarker::Type(b)) => a.as_ptr() == b.as_ptr(),
+            _ => false,
+        }
+    }
+}
+
+impl Hash for AllocMarker {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            AllocMarker::None => {}
+            AllocMarker::Type(ty) => ty.as_ptr().hash(state),
+        }
+    }
 }
 
 impl AllocMarker {
     /// Create marker based on a type. It is expected to use unit structures, for example,
     /// MonsterMarker or NpcMarker.
-    pub fn new<T: 'static>() -> Self {
-        AllocMarker::Type(TypeId::of::<T>())
+    pub fn new<T>() -> Self {
+        AllocMarker::Type(type_name::<T>())
     }
 }
 
 /// Allocation selector provides information needed to select appropriate allocator
 /// for some allocation.
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+#[derive(Copy, Clone, Eq, Debug)]
 pub struct AllocSelector {
     marker: AllocMarker,
-    ty: TypeId,
+    ty: &'static str,
+}
+
+impl PartialEq for AllocSelector {
+    fn eq(&self, other: &Self) -> bool {
+        self.marker == other.marker && self.ty.as_ptr() == other.ty.as_ptr()
+    }
+}
+
+impl Hash for AllocSelector {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.marker.hash(state);
+        self.ty.as_ptr().hash(state);
+    }
 }
 
 impl AllocSelector {
     /// Create new selector for given type.
-    pub fn new<T: 'static + ?Sized>() -> Self {
+    pub fn new<T: ?Sized>() -> Self {
         AllocSelector {
-            ty: TypeId::of::<T>(),
+            ty: type_name::<T>(),
             marker: AllocMarker::None,
         }
     }
 
     /// Create selector for given type with attached marker.
-    pub fn with_marker<T: 'static + ?Sized>(marker: AllocMarker) -> Self {
+    pub fn with_marker<T: ?Sized>(marker: AllocMarker) -> Self {
         AllocSelector {
-            ty: TypeId::of::<T>(),
+            ty: type_name::<T>(),
             marker,
         }
     }
@@ -65,7 +103,7 @@ impl AllocSelector {
     }
 
     /// Type for which the selector was created.
-    pub fn ty(&self) -> TypeId {
+    pub fn ty(&self) -> &'static str {
         self.ty
     }
 }
@@ -92,7 +130,7 @@ impl Env {
         mut f: impl FnMut(&mut S) -> T,
     ) -> T
     where
-        S: Scope + 'static,
+        S: Scope,
     {
         use crate::marker::UnsafeFrom;
         unsafe {
@@ -100,7 +138,7 @@ impl Env {
             let prev: &mut dyn Scope = impose_lifetime_mut(self.cur.as_mut());
             let mut new_scope = scope_init(&*prev);
             // SAFETY: new scope will survive scope execution by definition.
-            self.cur = ScopedMut::unsafe_from(&mut new_scope as &mut (dyn Scope + 'static));
+            self.cur = ScopedMut::unsafe_from(transmute_copy::<_, &mut dyn Scope>(&new_scope));
 
             let t = f(&mut new_scope);
             // SAFETY: we will give up execution to previous scope so restore previous
