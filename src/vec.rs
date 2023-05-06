@@ -1,13 +1,4 @@
-use core::{
-    borrow::{Borrow, BorrowMut},
-    cmp,
-    hash::{Hash, Hasher},
-    iter::FusedIterator,
-    mem::{self, size_of, ManuallyDrop, MaybeUninit},
-    ops::{Deref, DerefMut, Index, IndexMut, RangeBounds},
-    ptr::{self, copy_nonoverlapping, drop_in_place},
-    slice::{self, SliceIndex},
-};
+use core::{borrow::{Borrow, BorrowMut}, cmp, fmt, hash::{Hash, Hasher}, iter::FusedIterator, mem::{self, size_of, ManuallyDrop, MaybeUninit}, ops::{Deref, DerefMut, Index, IndexMut, RangeBounds}, ptr::{self, copy_nonoverlapping, drop_in_place}, slice::{self, SliceIndex}};
 
 use super::*;
 use crate::test_log::trace;
@@ -888,6 +879,12 @@ impl<T: 'static> Default for Vec<T> {
     #[inline]
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for Vec<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
     }
 }
 
