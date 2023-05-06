@@ -10,6 +10,7 @@ use core::{
     ptr::{self, drop_in_place},
     sync::atomic::{AtomicUsize, Ordering},
 };
+use crate::scope::{Envelop, Envelope, ScopeRecv};
 
 const MAX_REFCOUNT: usize = isize::MAX as _;
 
@@ -462,7 +463,7 @@ impl<T: ?Sized + core::hash::Hash> core::hash::Hash for Arc<T> {
 
 impl<T: RefUnwindSafe + ?Sized> UnwindSafe for Arc<T> {}
 
-impl<T: ?Sized + 'static> Clone for Arc<T> {
+impl<T: ?Sized> Clone for Arc<T> {
     #[inline]
     fn clone(&self) -> Self {
         // Using a relaxed ordering is alright here, as knowledge of the
@@ -539,6 +540,16 @@ impl<T: ?Sized> Drop for Arc<T> {
     }
 }
 
+impl<'env, T: ?Sized + 'env> Envelop<'env> for Arc<T> {
+    type Send = Arc<T>;
+
+    fn envelop(&self, _scope: &impl ScopeRecv<'env>) -> Envelope<'env, Self::Send> {
+        // SAFETY: constraints guarantee that the returned envelope is valid
+        // for the lifetime of the scope.
+        unsafe { Envelope::new(self.clone()) }
+    }
+}
+
 #[cfg(all(test, not(feature = "no_std")))]
 mod tests {
     // Many copied from:
@@ -568,7 +579,7 @@ mod tests {
             });
 
             info!("Sending Arc");
-            tx.send(s.envelop(arc_v.clone())).unwrap();
+            tx.send(arc_v.envelop(s)).unwrap();
 
             assert_eq!((*arc_v)[2], 3);
             assert_eq!((*arc_v)[4], 5);

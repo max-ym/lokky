@@ -194,6 +194,20 @@ pub struct Envelope<'scope, T: 'scope> {
     _scope: PhantomData<&'scope mut T>,
 }
 
+impl<'scope, T: 'scope> Envelope<'scope, T> {
+    /// # Safety
+    /// This allows to create [Send]-able types without compiler verifying safety of
+    /// this. The user must ensure that the value is valid during the lifetime of the
+    /// scope where it was originally created and that the data is sendable in the form
+    /// presented.
+    pub unsafe fn new(val: T) -> Self {
+        Envelope {
+            val,
+            _scope: PhantomData,
+        }
+    }
+}
+
 unsafe impl<'scope, T: 'scope> Send for Envelope<'scope, T> {}
 
 /// Trait to indicate the other thread's scope that can receive [Envelope] types.
@@ -203,14 +217,13 @@ pub trait ScopeRecv<'inner> {
     fn recv<T: 'inner>(&self, v: Envelope<'inner, T>) -> T {
         v.val
     }
+}
 
-    /// Envelop the given data to be passed inside the scope to another thread.
-    fn envelop<T: 'inner>(&self, val: T) -> Envelope<'inner, T> {
-        Envelope {
-            val,
-            _scope: PhantomData,
-        }
-    }
+/// Envelop the given data to be passed inside the scope to another thread.
+pub trait Envelop<'env> where Self: 'env {
+    type Send: 'env;
+
+    fn envelop(&self, scope: &impl ScopeRecv<'env>) -> Envelope<'env, Self::Send>;
 }
 
 #[cfg(not(feature = "no_std"))]
