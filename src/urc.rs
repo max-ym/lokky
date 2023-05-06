@@ -12,7 +12,7 @@
 
 use crate::arc::AtomicCounter;
 use crate::marker::{MaybeDropped, Scoped, UnsafeFrom, UnsafeInto};
-use crate::scope::AllocSelector;
+use crate::scope::{AllocSelector, Envelope, ScopeRecv, Envelop};
 use crate::{AllocError, ScopePtr};
 use core::any::Any;
 use core::cell::Cell;
@@ -23,7 +23,10 @@ use core::ptr::drop_in_place;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use core::{fmt, mem, ptr};
+use std::panic::{RefUnwindSafe, UnwindSafe};
+use crate::test_log::trace;
 
+// TODO update this docs, it seems we wont share Fence directly, instead use Envelopes!!!
 /// `Fence` allows to share the data behind `Urc` between threads.
 /// Each `Urc` in a single thread points to it's corresponding `Fence`.
 /// Each same thread cloning of `Urc` is then performed as on plain `Rc`
@@ -205,7 +208,7 @@ impl<T: ?Sized> Urc<T> {
     }
 }
 
-impl<T: 'static> Urc<T> {
+impl<T> Urc<T> {
     #[inline]
     pub fn new(data: T) -> Self {
         Self::try_new(data).unwrap()
@@ -218,12 +221,12 @@ impl<T: 'static> Urc<T> {
             weak_fence: 0.into(),
             data: data.into(),
         };
-        let data = unsafe { Scoped::unsafe_from(&master.data).unsafe_into() };
         let fence = Fence {
             strong: 1.into(),
             weak: 0.into(),
             master: ManuallyDrop::new(ScopePtr::alloc(master, AllocSelector::new::<Master<T>>())?),
         };
+        let data = unsafe { Scoped::unsafe_from(&fence.master.data).unsafe_into() };
         let urc = Urc {
             fence: ManuallyDrop::new(ScopePtr::alloc(fence, AllocSelector::new::<T>())?),
             data,
@@ -251,9 +254,7 @@ impl<T: 'static> Urc<T> {
     pub fn try_pin(data: T) -> Result<Pin<Self>, AllocError> {
         unsafe { Ok(Pin::new_unchecked(Self::try_new(data)?)) }
     }
-}
 
-impl<T> Urc<T> {
     pub fn try_unwrap(mut this: Self) -> Result<T, Self> {
         if this
             .master()
@@ -494,12 +495,15 @@ impl<T: ?Sized> Clone for Urc<T> {
 
 impl<T: ?Sized> Drop for Urc<T> {
     fn drop(&mut self) {
+        trace!("Dropping Urc");
         if Urc::fence_strong_count(self) == 1 && Urc::fence_weak_count(self) == 0 {
             // The fence is no more referenced so drop it.
+            trace!("Will drop Fence as it is the only Urc for it");
             let master = unsafe { &mut *(self.master_mut() as *mut Master<T>) };
             unsafe { ManuallyDrop::drop(&mut self.fence) };
 
             if master.strong_fence.fetch_sub(1, Release) == 1 {
+                trace!("Will drop Master as this also was the only Fence");
                 core::sync::atomic::fence(Acquire);
 
                 // Destroy the data at this time, even though we must not free the box
@@ -604,5 +608,67 @@ impl<T: ?Sized + Ord + PartialOrd> Ord for Urc<T> {
 impl<T: ?Sized + core::hash::Hash> core::hash::Hash for Urc<T> {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         (**self).hash(state)
+    }
+}
+
+impl<T: RefUnwindSafe + ?Sized> UnwindSafe for Urc<T> {}
+
+impl<'env, T: 'env> Envelop<'env> for Urc<T> {
+    type Send = Urc<T>;
+
+    fn envelop(&self, scope: &impl ScopeRecv<'env>) -> Envelope<'env, Self::Send> {
+        trace!("Enveloping Urc");
+        let master = unsafe { self.fence().master.clone() };
+        let cnt = master.strong_fence.fetch_add(1, Acquire);
+        trace!("Previous strong fence count: {cnt}; new fence created");
+
+        let fence = Fence {
+            strong: 1.into(),
+            weak: 0.into(),
+            master: ManuallyDrop::new(master),
+        };
+
+        unsafe {
+            Envelope::new(
+                Urc {
+                    fence: ManuallyDrop::new(ScopePtr::alloc(fence, AllocSelector::new::<T>()).unwrap()),
+                    data: self.data.clone(),
+                }
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::channel;
+    use std::thread;
+    use crate::scope::ScopeRecv;
+    use crate::test::init;
+    use crate::test_log::info;
+    use super::*;
+
+    #[test]
+    fn manually_share_urc() {
+        init();
+        use crate::vec::Vec;
+
+        let v = Vec::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        let urc_v = Urc::new(v);
+        let (tx, rx) = channel();
+
+        thread::scope(|s| {
+            info!("Spawning thread");
+            let _t = s.spawn(move || {
+                let urc_v: Urc<Vec<i32>> = s.recv(rx.recv().unwrap());
+                assert_eq!((*urc_v)[3], 4);
+            });
+
+            info!("Sending Urc");
+            tx.send(urc_v.envelop(s)).unwrap();
+
+            assert_eq!((*urc_v)[2], 3);
+            assert_eq!((*urc_v)[4], 5);
+        });
     }
 }
